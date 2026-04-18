@@ -14,29 +14,31 @@ export const ChartRepository = {
       specialty,
       dateOfService,
       provider,
-      documentCount = 0
+      documentCount = 0,
+      ownerCode = null
     } = chartData;
 
     const result = await query(
       `INSERT INTO charts (
-        chart_number, mrn, facility, specialty, date_of_service, 
-        provider, document_count, ai_status, review_status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 'pending')
-      ON CONFLICT (chart_number) 
-      DO UPDATE SET 
+        chart_number, mrn, facility, specialty, date_of_service,
+        provider, document_count, ai_status, review_status, owner_code
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 'pending', $8)
+      ON CONFLICT (chart_number)
+      DO UPDATE SET
         mrn = COALESCE(NULLIF(EXCLUDED.mrn, ''), charts.mrn),
         facility = COALESCE(NULLIF(EXCLUDED.facility, ''), charts.facility),
         specialty = COALESCE(NULLIF(EXCLUDED.specialty, ''), charts.specialty),
         date_of_service = COALESCE(EXCLUDED.date_of_service, charts.date_of_service),
         provider = COALESCE(NULLIF(EXCLUDED.provider, ''), charts.provider),
         document_count = charts.document_count + EXCLUDED.document_count,
-        ai_status = CASE 
-          WHEN charts.ai_status IN ('ready', 'submitted') THEN charts.ai_status 
-          ELSE 'queued' 
+        owner_code = COALESCE(charts.owner_code, EXCLUDED.owner_code),
+        ai_status = CASE
+          WHEN charts.ai_status IN ('ready', 'submitted') THEN charts.ai_status
+          ELSE 'queued'
         END,
         updated_at = CURRENT_TIMESTAMP
       RETURNING *`,
-      [chartNumber, mrn, facility, specialty, dateOfService, provider, documentCount]
+      [chartNumber, mrn, facility, specialty, dateOfService, provider, documentCount, ownerCode]
     );
 
     return result.rows[0];
@@ -283,6 +285,7 @@ export const ChartRepository = {
       aiStatus,
       reviewStatus,
       search,
+      ownerCode,
       page = 1,
       limit = 10,
       sortBy = 'created_at',
@@ -292,6 +295,12 @@ export const ChartRepository = {
     let whereConditions = [];
     let params = [];
     let paramIndex = 1;
+
+    if (ownerCode) {
+      whereConditions.push(`owner_code = $${paramIndex}`);
+      params.push(ownerCode);
+      paramIndex++;
+    }
 
     if (facility) {
       whereConditions.push(`facility = $${paramIndex}`);
@@ -341,14 +350,14 @@ export const ChartRepository = {
     const order = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     const dataResult = await query(
-      `SELECT 
+      `SELECT
         id, chart_number, mrn, facility, specialty, date_of_service, provider,
-        ai_status, review_status, document_count,
+        ai_status, review_status, document_count, owner_code,
         last_error, last_error_at, retry_count,
         processing_started_at, processing_completed_at,
         created_at, updated_at
-       FROM charts ${whereClause} 
-       ORDER BY ${sortColumn} ${order} 
+       FROM charts ${whereClause}
+       ORDER BY ${sortColumn} ${order}
        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
       [...params, limit, offset]
     );

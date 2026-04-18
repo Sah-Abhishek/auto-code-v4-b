@@ -22,12 +22,15 @@ class ChartController {
         sortOrder
       } = req.query;
 
+      const ownerCode = req.auth?.role === 'user' ? req.auth.code : null;
+
       const result = await ChartRepository.getAll({
         facility,
         specialty,
         aiStatus,
         reviewStatus,
         search,
+        ownerCode,
         page: parseInt(page),
         limit: parseInt(limit),
         sortBy,
@@ -99,6 +102,10 @@ class ChartController {
           success: false,
           error: 'Chart not found'
         });
+      }
+
+      if (req.auth?.role === 'user' && chart.owner_code !== req.auth.code) {
+        return res.status(404).json({ success: false, error: 'Chart not found' });
       }
 
       const slaInfo = calculateProcessingDuration(chart.created_at, chart.processing_completed_at);

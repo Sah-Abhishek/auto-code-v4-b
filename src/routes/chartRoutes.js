@@ -1,19 +1,18 @@
 import { Router } from 'express';
 import { chartController } from '../controllers/chartController.js';
 import { query } from '../db/connection.js';
+import { authenticate, requireAdmin, requireChartOwnership } from '../middleware/auth.js';
 
 const router = Router();
 
-// ═══════════════════════════════════════════════════════════════
-// STATIC ROUTES (must be before :chartNumber route)
-// ═══════════════════════════════════════════════════════════════
+router.use(authenticate);
 
-// SLA Statistics
-router.get('/stats/sla', chartController.getSLAStats.bind(chartController));
+// SLA Statistics (admin only — global stats)
+router.get('/stats/sla', requireAdmin, chartController.getSLAStats.bind(chartController));
 
-// Analytics endpoints
-router.get('/analytics/modifications', chartController.getModificationAnalytics.bind(chartController));
-router.get('/analytics/dashboard', chartController.getDashboardAnalytics.bind(chartController));
+// Analytics endpoints (admin only)
+router.get('/analytics/modifications', requireAdmin, chartController.getModificationAnalytics.bind(chartController));
+router.get('/analytics/dashboard', requireAdmin, chartController.getDashboardAnalytics.bind(chartController));
 
 // Filter options
 router.get('/filters/facilities', chartController.getFacilities.bind(chartController));
@@ -22,7 +21,7 @@ router.get('/filters/specialties', chartController.getSpecialties.bind(chartCont
 // ═══════════════════════════════════════════════════════════════
 // DEBUG ENDPOINT - get raw data from database with code analysis
 // ═══════════════════════════════════════════════════════════════
-router.get('/debug/:chartNumber', async (req, res) => {
+router.get('/debug/:chartNumber', requireAdmin, async (req, res) => {
   try {
     const { chartNumber } = req.params;
 
@@ -140,25 +139,25 @@ router.get('/debug/:chartNumber', async (req, res) => {
 // CHART CRUD OPERATIONS
 // ═══════════════════════════════════════════════════════════════
 
-// Get all charts (work queue)
+// Get all charts (scoped to user if not admin)
 router.get('/', chartController.getCharts.bind(chartController));
 
 // Get single chart with full details
-router.get('/:chartNumber', chartController.getChart.bind(chartController));
+router.get('/:chartNumber', requireChartOwnership, chartController.getChart.bind(chartController));
 
 // Save user modifications (auto-save as user edits)
-router.post('/:chartNumber/modifications', chartController.saveModifications.bind(chartController));
+router.post('/:chartNumber/modifications', requireChartOwnership, chartController.saveModifications.bind(chartController));
 
-// Submit final codes to NextCode
-router.post('/:chartNumber/submit', chartController.submitCodes.bind(chartController));
+// Submit final codes
+router.post('/:chartNumber/submit', requireChartOwnership, chartController.submitCodes.bind(chartController));
 
-// NEW: Retry failed chart processing
-router.post('/:chartNumber/retry', chartController.retryChart.bind(chartController));
+// Retry failed chart processing
+router.post('/:chartNumber/retry', requireChartOwnership, chartController.retryChart.bind(chartController));
 
 // Update chart review status
-router.patch('/:chartNumber/status', chartController.updateStatus.bind(chartController));
+router.patch('/:chartNumber/status', requireChartOwnership, chartController.updateStatus.bind(chartController));
 
 // Delete chart
-router.delete('/:chartNumber', chartController.deleteChart.bind(chartController));
+router.delete('/:chartNumber', requireChartOwnership, chartController.deleteChart.bind(chartController));
 
 export default router;

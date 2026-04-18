@@ -1,9 +1,13 @@
 import { Router } from 'express';
 import documentRoutes from './documentRoutes.js';
 import chartRoutes from './chartRoutes.js';
+import authRoutes from './authRoutes.js';
+import adminRoutes from './adminRoutes.js';
 
 const router = Router();
 
+router.use('/auth', authRoutes);
+router.use('/admin', adminRoutes);
 router.use('/documents', documentRoutes);
 router.use('/charts', chartRoutes);
 

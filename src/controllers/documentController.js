@@ -2,6 +2,7 @@ import { s3Service } from '../services/s3Service.js';
 import { cleanupFiles } from '../middleware/upload.js';
 import { ChartRepository, DocumentRepository } from '../db/chartRepository.js';
 import { QueueService } from '../db/queueService.js';
+import { AccessRepository } from '../db/accessRepository.js';
 import { v4 as uuidv4 } from 'uuid';
 
 // ═══════════════════════════════════════════════════════════════
@@ -41,6 +42,18 @@ class DocumentController {
       const files = req.files || [];
       const { documentType, mrn, chartNumber, facility, specialty, dateOfService, provider, transactions } = req.body;
 
+      const ownerCode = req.auth?.role === 'user' ? req.auth.code : null;
+      if (!ownerCode) {
+        cleanupFiles(files);
+        return res.status(403).json({ success: false, error: 'Only users can process documents' });
+      }
+
+      const status = await AccessRepository.getStatus(req.auth.account);
+      if (!status.valid) {
+        cleanupFiles(files);
+        return res.status(403).json({ success: false, error: status.reason });
+      }
+
       log.divider();
       log.info('UPLOAD_START', `Received upload request`);
       log.info('UPLOAD_START', `Chart Number: ${chartNumber || 'Not provided'}`);
@@ -77,6 +90,12 @@ class DocumentController {
 
       log.info('UPLOAD_DB', `Creating/updating chart record: ${chartNumber}`);
 
+      const existingChart = await ChartRepository.getByChartNumber(chartNumber);
+      if (existingChart && existingChart.owner_code && existingChart.owner_code !== ownerCode) {
+        cleanupFiles(files);
+        return res.status(403).json({ success: false, error: 'This chart belongs to another account' });
+      }
+
       const chart = await ChartRepository.createQueued({
         chartNumber,
         mrn: mrn || '',
@@ -84,7 +103,8 @@ class DocumentController {
         specialty: specialty || '',
         dateOfService: dateOfService || null,
         provider: provider || '',
-        documentCount: files.length
+        documentCount: files.length,
+        ownerCode
       });
 
       log.success('UPLOAD_DB', `Chart record created/updated`, { chartId: chart.id });
@@ -200,6 +220,8 @@ class DocumentController {
 
       const job = await QueueService.addJob(chart.id, chartNumber, jobData);
 
+      const updatedAccount = await AccessRepository.incrementUsed(ownerCode);
+
       log.success('UPLOAD_COMPLETE', `Documents uploaded and queued successfully`, {
         chartNumber,
         chartId: chart.id,
@@ -227,7 +249,8 @@ class DocumentController {
           transactionId: doc.transactionId,
           status: 'uploaded'
         })),
-        estimatedProcessingTime: '30-60 seconds'
+        estimatedProcessingTime: '30-60 seconds',
+        processRemaining: Math.max(0, updatedAccount.process_limit - updatedAccount.process_used)
       });
 
     } catch (error) {
