@@ -13,17 +13,17 @@ function generateCode() {
 }
 
 export const AccessRepository = {
-  async create({ clientName, speciality, userName, designation, processLimit, validDays }) {
+  async create({ clientName, speciality, userName, designation, processLimit, validDays, email }) {
     const validUntil = new Date(Date.now() + validDays * 24 * 60 * 60 * 1000);
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateCode();
       try {
         const result = await query(
           `INSERT INTO access_accounts
-            (code, client_name, speciality, user_name, designation, process_limit, valid_days, valid_until)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (code, client_name, speciality, user_name, designation, process_limit, valid_days, valid_until, email)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING *`,
-          [code, clientName, speciality, userName, designation, processLimit, validDays, validUntil]
+          [code, clientName, speciality, userName, designation, processLimit, validDays, validUntil, email || null]
         );
         return result.rows[0];
       } catch (err) {

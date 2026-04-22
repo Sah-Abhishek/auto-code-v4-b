@@ -6,8 +6,7 @@ dotenv.config();
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const pool = new pg.Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL
 });
 
 async function migrate() {
@@ -35,6 +34,9 @@ async function migrate() {
 
     await client.query(`CREATE INDEX IF NOT EXISTS idx_access_accounts_code ON access_accounts(code)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_access_accounts_revoked ON access_accounts(revoked)`);
+
+    console.log('Adding email column to access_accounts...');
+    await client.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS email VARCHAR(255)`);
 
     console.log('Adding owner_code column to charts...');
     await client.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS owner_code VARCHAR(32)`);
