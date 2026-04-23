@@ -55,6 +55,7 @@ async function initDatabase() {
         lab_results_summary JSONB,
         coding_notes JSONB,
         sla_data JSONB,
+        gateway_encounter JSONB,
         
         -- Original AI codes for comparison
         original_ai_codes JSONB,

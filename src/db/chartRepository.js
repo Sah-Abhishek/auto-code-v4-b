@@ -96,6 +96,11 @@ export const ChartRepository = {
       generated_at: new Date().toISOString()
     };
 
+    const slaWithTiming = {
+      ...(slaData || {}),
+      pipeline_timing: aiResults.pipeline_timing || (slaData && slaData.pipeline_timing) || {},
+    };
+
     const result = await query(
       `UPDATE charts SET
         ai_status = 'ready',
@@ -108,6 +113,7 @@ export const ChartRepository = {
         coding_notes = $8,
         sla_data = $9,
         original_ai_codes = $10,
+        gateway_encounter = $11,
         processing_completed_at = CURRENT_TIMESTAMP,
         last_error = NULL,
         last_error_at = NULL,
@@ -124,8 +130,9 @@ export const ChartRepository = {
         JSON.stringify(aiResults.vitals_summary || {}),
         JSON.stringify(aiResults.lab_results_summary || []),
         JSON.stringify(aiResults.coding_notes || {}),
-        JSON.stringify(slaData || {}),
-        JSON.stringify(originalAICodes)
+        JSON.stringify(slaWithTiming),
+        JSON.stringify(originalAICodes),
+        JSON.stringify(aiResults.gateway_encounter || null)
       ]
     );
 

@@ -1,705 +1,269 @@
-import OpenAI from 'openai';
+import axios from 'axios';
+import FormData from 'form-data';
 import { config } from '../config.js';
+
+const REPORT_TYPE_DEFAULT = 'CLINIC_NOTE';
+
+const numericConfidenceToLabel = (n) => {
+  if (typeof n !== 'number') return n || 'medium';
+  if (n >= 0.8) return 'high';
+  if (n >= 0.5) return 'medium';
+  return 'low';
+};
 
 class AIService {
   constructor() {
-    this.client = new OpenAI({
-      apiKey: config.ai.apiKey
+    const { baseUrl, token, encounterType, pollIntervalMs, pollTimeoutMs, requestTimeoutMs } = config.gateway;
+    if (!baseUrl || !token) {
+      throw new Error('ICD gateway not configured: ICD_GATEWAY_URL and ICD_GATEWAY_TOKEN are required');
+    }
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.token = token;
+    this.encounterType = encounterType;
+    this.pollIntervalMs = pollIntervalMs;
+    this.pollTimeoutMs = pollTimeoutMs;
+    this.client = axios.create({
+      baseURL: this.baseUrl,
+      timeout: requestTimeoutMs,
+      headers: { Authorization: `Bearer ${token}` }
     });
-    this.model = config.ai.model;
   }
 
   /**
-   * Build the system prompt for medical coding
+   * Run the full Section B encounter pipeline (B1→B5) and return the gateway encounter.
+   * `documents` are file buffers fetched from S3 by the worker:
+   *   [{ buffer, filename, mimeType, reportType }]
    */
-  getSystemPrompt() {
-    return `You are an expert medical coder and clinical documentation specialist with extensive experience in ED/Emergency Department coding, ICD-10-CM diagnosis coding, CPT procedure coding, and modifier application.
-
-Your task is to analyze clinical documents and extract ALL applicable codes organized into these specific categories:
-
-1. **Reason for Admit**: The principal reason or condition that caused the patient to seek care. This is typically derived from the chief complaint and should be an ICD-10-CM code. This may differ from the primary diagnosis.
-
-2. **Primary Diagnosis (PDX)**: The SINGLE principal ICD-10-CM diagnosis code - the main condition established after study to be chiefly responsible for the visit.
-
-3. **Secondary Diagnoses (SDX)**: ALL additional ICD-10-CM diagnosis codes. This typically includes:
-   - Conditions treated during the visit
-   - Comorbidities affecting care (diabetes, hypertension, etc.)
-   - Chronic conditions being monitored
-   - Risk factors (family history, tobacco use, etc.)
-   - Status codes (Z codes for history, screening, etc.)
-   - External cause codes if applicable
-   
-   IMPORTANT: Include ALL relevant secondary diagnoses - real medical charts often have 10-20+ secondary codes.
-
-4. **Procedures (CPT)**: ALL CPT procedure codes for procedures performed. Multiple procedures are common - include ALL that apply.
-
-5. **ED/EM Level**: Evaluation & Management codes for emergency department visits (99281-99285) or office/outpatient visits (99202-99215). Include MDM justification.
-
-6. **Modifiers**: ALL applicable modifiers for procedures and E/M codes. Common modifiers:
-   - 25: Significant separate E/M with procedure
-   - 59/XE/XS/XP/XU: Distinct procedural services
-   - 76/77: Repeat procedures
-   - LT/RT: Laterality
-   - PT: Physical therapy
-   - TC/26: Technical/Professional component
-
-7. **Detailed Clinical Summary**: Provide comprehensive clinical narrative including:
-   - Patient demographics (age, sex)
-   - Chief complaint with onset, duration, severity
-   - Detailed HPI with all relevant elements
-   - Physical examination findings by system
-   - Vital signs
-   - Assessment and plan
-   - Timeline of care
-   - Clinical alerts and critical findings
-
-8. **Feedback**: Documentation gaps, coding tips, and physician queries.
-
-CRITICAL REQUIREMENTS:
-- Extract ALL applicable codes, not just the most obvious ones
-- For EVERY code, provide the EXACT text evidence from the document
-- Use the most specific ICD-10 code possible (include all digits)
-- Real charts typically have multiple procedures and many secondary diagnoses
-- Be thorough - missing codes means missed revenue and incomplete clinical picture
-- Provide detailed, actionable clinical summaries
-
-OUTPUT FORMAT: Valid JSON only, no markdown.`;
-  }
-
-  /**
-   * Build the user prompt with document content
-   */
-  buildUserPrompt(formattedDocuments, chartInfo) {
-    const documentContent = formattedDocuments.map(doc => {
-      const lines = doc.content.map(l => `[Line ${l.lineNumber}] ${l.text}`).join('\n');
-      return `
-=== DOCUMENT: ${doc.documentName} ===
-Type: ${doc.documentType}
-Total Lines: ${doc.totalLines}
-
-CONTENT:
-${lines}
-`;
-    }).join('\n\n');
-
-    return `Analyze the following clinical documents and extract ALL applicable medical codes with a detailed clinical summary.
-
-PATIENT INFORMATION:
-- MRN: ${chartInfo.mrn || 'Not provided'}
-- Chart Number: ${chartInfo.chartNumber || 'Not provided'}
-- Facility: ${chartInfo.facility || 'Not provided'}
-- Specialty: ${chartInfo.specialty || 'Not provided'}
-- Date of Service: ${chartInfo.dateOfService || 'Not provided'}
-
-CLINICAL DOCUMENTS:
-${documentContent}
-
-Extract ALL codes and respond with this JSON structure:
-
-{
-  "ai_narrative_summary": {
-    "patient_demographics": {
-      "age": "Patient age if found",
-      "sex": "Patient sex if found",
-      "weight": "Weight if documented",
-      "allergies": ["List of allergies"]
-    },
-    "chief_complaint": {
-      "text": "Detailed chief complaint - what brought the patient in",
-      "onset": "When symptoms started",
-      "duration": "How long symptoms have persisted",
-      "severity": "Severity rating or description",
-      "associated_symptoms": ["List of associated symptoms"],
-      "evidence": {
-        "document_type": "",
-        "document_name": "",
-        "line_number": "",
-        "exact_text": ""
-      }
-    },
-    "history_of_present_illness": {
-      "text": "Comprehensive HPI narrative covering all 8 elements where documented",
-      "location": "Where is the problem",
-      "quality": "Character of the symptom",
-      "severity": "1-10 or descriptive",
-      "duration": "How long",
-      "timing": "When does it occur",
-      "context": "What was patient doing",
-      "modifying_factors": "What makes it better/worse",
-      "associated_signs_symptoms": "Related findings",
-      "evidence": {
-        "document_type": "",
-        "document_name": "",
-        "line_number": "",
-        "exact_text": ""
-      }
-    },
-    "review_of_systems": {
-      "constitutional": "Fever, weight loss, fatigue, etc.",
-      "cardiovascular": "Chest pain, palpitations, edema, etc.",
-      "respiratory": "SOB, cough, wheezing, etc.",
-      "gastrointestinal": "N/V, diarrhea, abdominal pain, etc.",
-      "musculoskeletal": "Joint pain, swelling, weakness, etc.",
-      "neurological": "Headache, dizziness, numbness, etc.",
-      "psychiatric": "Depression, anxiety, etc.",
-      "other_systems": "Any other documented systems"
-    },
-    "past_medical_history": {
-      "conditions": ["List of past medical conditions"],
-      "surgeries": ["List of past surgeries"],
-      "hospitalizations": ["List of past hospitalizations"]
-    },
-    "medications": {
-      "current": ["List of current medications with doses"],
-      "allergies": ["Drug allergies"]
-    },
-    "social_history": {
-      "tobacco": "Tobacco use status",
-      "alcohol": "Alcohol use status",
-      "drugs": "Drug use status",
-      "occupation": "Occupation if relevant",
-      "living_situation": "Living situation if documented"
-    },
-    "family_history": {
-      "relevant_conditions": ["List of relevant family history"]
-    },
-    "physical_examination": {
-      "general": "General appearance",
-      "vitals": {
-        "blood_pressure": "",
-        "heart_rate": "",
-        "respiratory_rate": "",
-        "temperature": "",
-        "oxygen_saturation": "",
-        "pain_score": ""
-      },
-      "heent": "Head, eyes, ears, nose, throat exam",
-      "neck": "Neck examination",
-      "cardiovascular": "Heart exam findings",
-      "respiratory": "Lung exam findings",
-      "abdomen": "Abdominal exam findings",
-      "extremities": "Extremity exam",
-      "neurological": "Neuro exam",
-      "skin": "Skin exam",
-      "psychiatric": "Mental status"
-    },
-    "diagnostic_results": {
-      "labs": [
-        {
-          "test": "Test name",
-          "value": "Result value",
-          "unit": "Unit",
-          "flag": "normal/high/low/critical",
-          "clinical_significance": "Why this matters"
-        }
-      ],
-      "imaging": [
-        {
-          "study": "Study name",
-          "findings": "Key findings",
-          "impression": "Radiologist impression"
-        }
-      ],
-      "ekg": "EKG findings if performed",
-      "other_tests": ["Other diagnostic tests"]
-    },
-    "assessment_and_plan": {
-      "assessment": "Clinical assessment summary - what the provider concluded",
-      "diagnoses": ["List of diagnoses addressed"],
-      "plan": "Treatment plan summary",
-      "disposition": "Discharge, admit, transfer, etc.",
-      "follow_up": "Follow up instructions"
-    },
-    "timeline_of_care": [
-      {
-        "time": "Time of event",
-        "event": "What happened",
-        "description": "Details of the event",
-        "provider": "Who was involved",
-        "evidence": {
-          "document_type": "",
-          "document_name": "",
-          "line_number": "",
-          "exact_text": ""
-        }
-      }
-    ],
-    "clinical_alerts": [
-      {
-        "alert": "Important clinical finding or concern",
-        "severity": "high/medium/low",
-        "action_required": "What should be done",
-        "evidence": {
-          "document_type": "",
-          "document_name": "",
-          "line_number": "",
-          "exact_text": ""
-        }
-      }
-    ],
-    "attending_provider": "Attending physician name",
-    "consulting_providers": ["List of consultants"]
-  },
-  "coding_categories": {
-    "reason_for_admit": {
-      "codes": [
-        {
-          "icd_10_code": "R10.9",
-          "description": "Unspecified abdominal pain",
-          "ai_reasoning": "This is the reason the patient presented to the ED - the chief complaint that drove the encounter",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        }
-      ]
-    },
-    "primary_diagnosis": {
-      "codes": [
-        {
-          "icd_10_code": "K35.80",
-          "description": "Unspecified acute appendicitis",
-          "ai_reasoning": "This is the main condition established after study - the primary diagnosis after workup",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        }
-      ]
-    },
-    "secondary_diagnoses": {
-      "codes": [
-        {
-          "icd_10_code": "E11.9",
-          "description": "Type 2 diabetes mellitus without complications",
-          "ai_reasoning": "Documented comorbidity affecting care",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        }
-      ]
-    },
-    "procedures": {
-      "codes": [
-        {
-          "cpt_code": "99284",
-          "procedure_name": "ED visit, moderate-high severity",
-          "description": "Description of procedure performed",
-          "provider": "Provider name if found",
-          "date": "Date performed",
-          "findings": ["Finding 1", "Finding 2"],
-          "ai_reasoning": "Why this code was selected",
-          "confidence": "high",
-          "evidence": {
-            "document_type": "",
-            "document_name": "",
-            "line_number": "",
-            "exact_text": ""
-          }
-        }
-      ]
-    },
-    "ed_em_level": {
-      "codes": [
-        {
-          "code": "99284",
-          "description": "Emergency department visit, moderate-high severity",
-          "level_justification": {
-            "mdm_complexity": "Moderate to High",
-            "number_of_diagnoses": "Multiple diagnoses addressed",
-            "data_reviewed": "Labs, imaging reviewed",
-            "risk_of_complications": "Moderate risk - prescription drug management"
-          },
-          "ai_reasoning": "Detailed reasoning for this E/M level selection",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        }
-      ]
-    },
-    "modifiers": {
-      "codes": [
-        {
-          "modifier_code": "25",
-          "modifier_name": "Significant, Separately Identifiable E/M Service",
-          "applies_to_code": "99284",
-          "ai_reasoning": "E/M service provided in addition to procedure",
-          "confidence": "high",
-          "evidence": {
-            "document_type": "",
-            "document_name": "",
-            "line_number": "",
-            "exact_text": ""
-          }
-        }
-      ]
-    }
-  },
-  "feedback": {
-    "documentation_gaps": [
-      {
-        "gap": "Description of documentation gap",
-        "impact": "How this affects coding accuracy or reimbursement",
-        "suggestion": "What documentation would help",
-        "priority": "high/medium/low"
-      }
-    ],
-    "physician_queries_needed": [
-      {
-        "query": "Question for physician",
-        "reason": "Why this clarification is needed",
-        "impact_on_coding": "How the answer would change coding",
-        "priority": "high/medium/low"
-      }
-    ],
-    "coding_tips": [
-      {
-        "tip": "Coding recommendation or optimization",
-        "related_code": "Code this relates to",
-        "potential_impact": "Revenue or compliance impact"
-      }
-    ],
-    "compliance_alerts": [
-      {
-        "alert": "Compliance concern",
-        "regulation": "Relevant regulation or guideline",
-        "severity": "high/medium/low",
-        "recommended_action": "What to do"
-      }
-    ]
-  },
-  "medications": [
-    {
-      "name": "Medication name",
-      "dose": "Dose",
-      "route": "Route of administration",
-      "frequency": "Frequency",
-      "indication": "Why prescribed",
-      "new_or_existing": "new/existing"
-    }
-  ],
-  "vitals_summary": {
-    "blood_pressure": "",
-    "heart_rate": "",
-    "respiratory_rate": "",
-    "temperature": "",
-    "oxygen_saturation": "",
-    "pain_score": ""
-  },
-  "lab_results_summary": [
-    {
-      "test": "Test name",
-      "value": "Result",
-      "unit": "Unit",
-      "flag": "normal/high/low/critical",
-      "clinical_significance": "Why this matters"
-    }
-  ],
-  "metadata": {
-    "patient_age": "",
-    "sex": "",
-    "date_of_service": "${chartInfo.dateOfService || ''}",
-    "facility": "${chartInfo.facility || ''}",
-    "attending_provider": "",
-    "documents_analyzed": ${formattedDocuments.length},
-    "total_codes_extracted": 0
-  }
-}
-
-IMPORTANT CODING GUIDELINES:
-
-1. **Reason for Admit vs Primary Diagnosis**:
-   - Reason for Admit: Why the patient came in (chief complaint as ICD-10)
-   - Primary Diagnosis: What was found/diagnosed after evaluation
-   - These may be the same or different depending on the case
-
-2. **ED/EM Level Selection (99281-99285)**:
-   - 99281: Straightforward MDM, self-limited problem
-   - 99282: Low MDM, 2+ self-limited problems or 1 acute uncomplicated
-   - 99283: Moderate MDM, 1 acute uncomplicated illness with systemic symptoms
-   - 99284: Moderate-High MDM, 1 acute illness with systemic symptoms or 1 acute complicated injury
-   - 99285: High MDM, 1+ acute/chronic illness posing threat to life or function
-
-3. **Secondary Diagnoses - Include ALL of these if documented**:
-   - Active conditions being treated
-   - Chronic conditions (diabetes, hypertension, COPD, etc.)
-   - Family history codes (Z80-Z84)
-   - Personal history codes (Z85-Z87)
-   - Status codes (Z93-Z99)
-   - BMI codes if documented
-   - Tobacco/alcohol use codes
-   - Screening encounter codes
-   - External cause codes for injuries
-
-4. **Modifiers - Common combinations**:
-   - E/M + Procedure: Usually needs modifier 25 on E/M
-   - Multiple procedures: May need 59, XE, XS, XP, or XU
-   - Screening procedures: PT modifier
-   - Bilateral: 50 or RT/LT
-
-5. **Clinical Summary Requirements**:
-   - Be comprehensive - include all documented findings
-   - Organize by clinical relevance
-   - Highlight critical values and abnormal findings
-   - Note any missing documentation
-
-6. Extract ALL codes supported by documentation - be thorough!
-7. Every code MUST have evidence with exact_text from the document
-8. Return ONLY valid JSON, no markdown code blocks`;
-  }
-
-  /**
-   * Process documents through AI for ICD coding
-   */
-  async processForCoding(formattedDocuments, chartInfo) {
+  async processForCoding(documents, chartInfo) {
     try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages: [
-          {
-            role: 'system',
-            content: this.getSystemPrompt()
-          },
-          {
-            role: 'user',
-            content: this.buildUserPrompt(formattedDocuments, chartInfo)
-          }
-        ],
-        max_completion_tokens: 12000,
-        temperature: 0.1,
-        response_format: { type: "json_object" }
-      });
-
-      const textContent = response.choices[0]?.message?.content;
-      if (!textContent) {
-        throw new Error('No response from AI');
+      if (!Array.isArray(documents) || documents.length === 0) {
+        throw new Error('No documents provided for gateway processing');
       }
 
-      let result;
-      try {
-        result = JSON.parse(textContent);
-      } catch (parseError) {
-        const jsonMatch = textContent.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          result = JSON.parse(jsonMatch[0]);
-        } else {
-          result = {
-            raw_response: textContent,
-            parse_error: parseError.message
-          };
-        }
-      }
+      const encounter = await this.createEncounter(chartInfo);
+      const encounterId = encounter.id;
 
-      // Transform to database format
-      const transformedResult = this.transformToDBFormat(result);
+      await this.batchUpload(encounterId, documents);
+      const { task_id } = await this.runPipeline(encounterId);
+      await this.pollUntilDone(encounterId, task_id);
+      const finalEncounter = await this.fetchEncounter(encounterId);
 
-      // Add token usage info
-      transformedResult.ai_metadata = {
-        model: this.model,
-        prompt_tokens: response.usage?.prompt_tokens,
-        completion_tokens: response.usage?.completion_tokens,
-        total_tokens: response.usage?.total_tokens
-      };
-
-      return {
-        success: true,
-        data: transformedResult
-      };
+      const transformed = this.transformEncounterToDBFormat(finalEncounter);
+      return { success: true, data: transformed };
     } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
+      const detail = error.response?.data ? ` (gateway: ${JSON.stringify(error.response.data).slice(0, 300)})` : '';
+      return { success: false, error: `${error.message}${detail}` };
     }
   }
 
-  /**
-   * Transform AI response to database format
-   */
-  transformToDBFormat(aiResult) {
-    const codingCategories = aiResult.coding_categories || {};
+  // No-op kept for backwards compatibility with worker call sites.
+  async generateDocumentSummary() {
+    return { success: false, error: 'document summary not used in gateway flow' };
+  }
 
-    // Extract codes arrays from the new structure
-    const reasonForAdmitCodes = codingCategories.reason_for_admit?.codes || [];
-    const edEmCodes = codingCategories.ed_em_level?.codes || [];
-    const procedureCodes = codingCategories.procedures?.codes || [];
-    const primaryDxCodes = codingCategories.primary_diagnosis?.codes || [];
-    const secondaryDxCodes = codingCategories.secondary_diagnoses?.codes || [];
-    const modifierCodes = codingCategories.modifiers?.codes || [];
+  // ────────────────────────────────────────────────────────────
+  // Gateway calls
+  // ────────────────────────────────────────────────────────────
 
-    return {
-      // AI Summary (enhanced)
-      ai_narrative_summary: aiResult.ai_narrative_summary,
+  async createEncounter(chartInfo) {
+    const today = new Date().toISOString().slice(0, 10);
+    const body = {
+      mrn: chartInfo.mrn || '00000000',
+      encounter_type: this.encounterType,
+      encounter_date: today,
+      facility: chartInfo.facility || undefined,
+      department: chartInfo.specialty || undefined,
+    };
+    const { data } = await this.client.post('/api/encounters', body);
+    if (!data?.id) throw new Error('Gateway B1: missing encounter id in response');
+    return data;
+  }
 
-      // All codes organized by category with the new array structure
-      diagnosis_codes: {
-        reason_for_admit: reasonForAdmitCodes,
-        ed_em_level: edEmCodes,
-        primary_diagnosis: primaryDxCodes,
-        secondary_diagnoses: secondaryDxCodes,
-        modifiers: modifierCodes,
-        // Backward compatibility
-        principal_diagnosis: primaryDxCodes[0] || null
-      },
+  async batchUpload(encounterId, documents) {
+    const form = new FormData();
+    form.append('encounter_id', encounterId);
+    form.append('encounter_type', this.encounterType);
+    form.append('report_types', documents.map(d => d.reportType || REPORT_TYPE_DEFAULT).join(','));
+    for (const doc of documents) {
+      form.append('files', doc.buffer, {
+        filename: doc.filename,
+        contentType: doc.mimeType,
+      });
+    }
+    const { data } = await this.client.post('/api/upload/batch', form, {
+      headers: form.getHeaders(),
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    if (!data || data.failed > 0) {
+      throw new Error(`Gateway B2: batch upload reported ${data?.failed ?? '?'} failure(s)`);
+    }
+    return data;
+  }
 
-      // Procedures as array
-      procedures: procedureCodes,
+  async runPipeline(encounterId) {
+    const { data } = await this.client.post(`/api/encounters/${encounterId}/run`, {});
+    if (!data?.task_id) throw new Error('Gateway B3: missing task_id in response');
+    return data;
+  }
 
-      // Feedback/Coding notes
-      coding_notes: aiResult.feedback || {
+  async pollUntilDone(encounterId, taskId) {
+    const start = Date.now();
+    while (Date.now() - start < this.pollTimeoutMs) {
+      const { data } = await this.client.get(`/api/encounters/${encounterId}/status/${taskId}`);
+      const status = data?.status;
+      if (status === 'SUCCESS') return data;
+      if (status === 'FAILURE' || status === 'ERROR') {
+        throw new Error(`Gateway B4: task ${status}: ${data?.error || 'no error message'}`);
+      }
+      await new Promise(r => setTimeout(r, this.pollIntervalMs));
+    }
+    throw new Error(`Gateway B4: poll timeout after ${this.pollTimeoutMs}ms`);
+  }
+
+  async fetchEncounter(encounterId) {
+    const { data } = await this.client.get(`/api/encounters/${encounterId}`);
+    if (!data) throw new Error('Gateway B5: empty response');
+    return data;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // Mapping gateway encounter → existing DB JSONB shape used by ChartDetail.jsx
+  // ────────────────────────────────────────────────────────────
+
+  transformEncounterToDBFormat(encounter) {
+    const final = encounter?.final_codes_json || {};
+    const agent4 = final.agent4_full || null;
+    const summary = encounter?.clinical_summary || {};
+    const timing = encounter?.pipeline_timing || {};
+    const auditNotes = agent4?.audit_notes || final.audit_notes || '';
+
+    // Prefer the rich agent4_full payload (matches the legacy OpenAI shape exactly).
+    // Fall back to mapping the flat final_codes_json.codes[] when agent4_full is absent.
+    let diagnosis_codes;
+    let procedures;
+    let ai_narrative_summary;
+    let coding_notes;
+    let medications;
+    let vitals_summary;
+    let lab_results_summary;
+
+    if (agent4) {
+      const cc = agent4.coding_categories || {};
+      const primaryDx = cc.primary_diagnosis?.codes || [];
+      diagnosis_codes = {
+        reason_for_admit: cc.reason_for_admit?.codes || [],
+        ed_em_level: cc.ed_em_level?.codes || [],
+        primary_diagnosis: primaryDx,
+        secondary_diagnoses: cc.secondary_diagnoses?.codes || [],
+        modifiers: cc.modifiers?.codes || [],
+        principal_diagnosis: primaryDx[0] || null,
+      };
+      procedures = cc.procedures?.codes || [];
+      ai_narrative_summary = agent4.ai_narrative_summary || this.buildSummaryFromClinical(summary);
+      coding_notes = {
+        documentation_gaps: agent4.feedback?.documentation_gaps || [],
+        physician_queries_needed: agent4.feedback?.physician_queries_needed || [],
+        coding_tips: agent4.feedback?.coding_tips || [],
+        compliance_alerts: agent4.feedback?.compliance_alerts || [],
+        audit_notes: auditNotes,
+      };
+      medications = agent4.medications || summary.medications || [];
+      vitals_summary = agent4.vitals_summary || summary.vitals || {};
+      lab_results_summary = agent4.lab_results_summary || this.labsFromSummary(summary);
+    } else {
+      // Flat-codes fallback (older gateway responses without agent4_full).
+      const flat = this.mapFlatCodes(final.codes || []);
+      diagnosis_codes = {
+        reason_for_admit: [],
+        ed_em_level: [],
+        primary_diagnosis: flat.primary,
+        secondary_diagnoses: flat.secondary,
+        modifiers: [],
+        principal_diagnosis: flat.primary[0] || null,
+      };
+      procedures = flat.procedures;
+      ai_narrative_summary = this.buildSummaryFromClinical(summary);
+      coding_notes = {
         documentation_gaps: [],
         physician_queries_needed: [],
         coding_tips: [],
-        compliance_alerts: []
-      },
+        compliance_alerts: [],
+        audit_notes: auditNotes,
+      };
+      medications = summary.medications || [];
+      vitals_summary = summary.vitals || {};
+      lab_results_summary = this.labsFromSummary(summary);
+    }
 
-      // Other fields
-      medications: aiResult.medications || [],
-      vitals_summary: aiResult.vitals_summary || {},
-      lab_results_summary: aiResult.lab_results_summary || [],
-      metadata: aiResult.metadata || {}
+    return {
+      ai_narrative_summary,
+      diagnosis_codes,
+      procedures,
+      coding_notes,
+      medications,
+      vitals_summary,
+      lab_results_summary,
+      gateway_encounter: encounter,
+      pipeline_timing: timing,
+      ai_metadata: {
+        provider: 'icd_predictor_gateway',
+        encounter_id: encounter?.id || null,
+        report_count: encounter?.report_count ?? null,
+        used_agent4_full: !!agent4,
+      },
     };
   }
 
-  /**
-   * Generate a summary for a single document
-   */
-  async generateDocumentSummary(ocrResult, chartInfo) {
-    try {
-      const text = typeof ocrResult.extractedText === 'string'
-        ? ocrResult.extractedText
-        : JSON.stringify(ocrResult.extractedText);
-
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages: [
-          {
-            role: 'system',
-            content: `You are a clinical documentation specialist. Analyze the given clinical document and provide a comprehensive structured summary. Return valid JSON only.`
-          },
-          {
-            role: 'user',
-            content: `Analyze this clinical document and provide a detailed summary.
-
-Document Type: ${ocrResult.documentType || 'Unknown'}
-Filename: ${ocrResult.filename}
-Facility: ${chartInfo.facility || 'Unknown'}
-Date: ${chartInfo.dateOfService || 'Unknown'}
-
-DOCUMENT CONTENT:
-${text}
-
-Respond with a JSON object:
-{
-  "document_type": "${ocrResult.documentType || 'Unknown'}",
-  "title": "Document title based on content",
-  "provider": "Provider name if found",
-  "date": "Document date if found",
-  "time": "Document time if found",
-  "sections": [
-    {
-      "section_name": "Section name (e.g., Chief Complaint, HPI, Physical Exam)",
-      "content": "Detailed summary of section content",
-      "source_line": "Line number where found",
-      "key_data_points": ["Important data points from this section"]
-    }
-  ],
-  "key_findings": [
-    {
-      "finding": "Important clinical finding",
-      "category": "vital/lab/imaging/exam/diagnosis/treatment",
-      "significance": "Why this is clinically important",
-      "source_section": "Where this was found"
-    }
-  ],
-  "extracted_data": {
-    "chief_complaint": "Detailed chief complaint",
-    "history_of_present_illness": "Full HPI narrative",
-    "review_of_systems": {
-      "documented_systems": ["List of ROS systems documented"],
-      "positive_findings": ["Positive findings"],
-      "negative_findings": ["Pertinent negatives"]
-    },
-    "past_medical_history": ["List of PMH items"],
-    "medications": ["Current medications"],
-    "allergies": ["Allergies"],
-    "social_history": "Social history summary",
-    "family_history": "Family history summary",
-    "physical_examination": {
-      "general": "General appearance",
-      "vital_signs": {
-        "blood_pressure": "",
-        "heart_rate": "",
-        "respiratory_rate": "",
-        "temperature": "",
-        "oxygen_saturation": "",
-        "pain_score": ""
-      },
-      "system_exams": {
-        "heent": "",
-        "neck": "",
-        "cardiovascular": "",
-        "respiratory": "",
-        "abdomen": "",
-        "extremities": "",
-        "neurological": "",
-        "skin": "",
-        "psychiatric": ""
+  mapFlatCodes(codes) {
+    const primary = [];
+    const secondary = [];
+    const procedures = [];
+    for (const c of codes) {
+      const base = {
+        confidence: numericConfidenceToLabel(c.confidence),
+        confidence_score: typeof c.confidence === 'number' ? c.confidence : null,
+        ai_reasoning: c.justification || '',
+        evidence: { exact_text: '' },
+      };
+      if (c.code_type === 'cpt') {
+        procedures.push({ ...base, cpt_code: c.code, procedure_name: c.description, description: c.description });
+      } else if (c.code_type === 'primary') {
+        primary.push({ ...base, icd_10_code: c.code, description: c.description });
+      } else {
+        secondary.push({ ...base, icd_10_code: c.code, description: c.description });
       }
-    },
-    "assessment": "Provider's assessment/impression",
-    "plan": "Treatment plan",
-    "disposition": "Discharge, admit, etc."
-  },
-  "clinical_relevance": "Comprehensive summary of why this document is important for coding and what codes it supports",
-  "coding_implications": ["List of potential codes supported by this document"]
-}`
-          }
+    }
+    return { primary, secondary, procedures };
+  }
+
+  buildSummaryFromClinical(summary) {
+    return {
+      patient_demographics: {},
+      chief_complaint: summary.chief_complaint || '',
+      history_of_present_illness: summary.clinical_context || '',
+      social_history: summary.social_history || {},
+      vitals: summary.vitals || {},
+      assessment_and_plan: {
+        assessment: (summary.primary_diagnoses || []).join('; '),
+        diagnoses: [
+          ...(summary.primary_diagnoses || []),
+          ...(summary.secondary_diagnoses || []),
         ],
-        max_tokens: 4000,
-        temperature: 0.1,
-        response_format: { type: "json_object" }
-      });
+        plan: (summary.procedures_performed || []).join('; '),
+      },
+      attending_provider: '',
+    };
+  }
 
-      const textContent = response.choices[0]?.message?.content;
-      if (!textContent) {
-        throw new Error('No response from AI');
-      }
-
-      const result = JSON.parse(textContent);
-
-      return {
-        success: true,
-        data: result
-      };
-    } catch (error) {
-      return {
-        success: false,
-        error: error.message
-      };
-    }
+  labsFromSummary(summary) {
+    if (!summary?.significant_labs || !Object.keys(summary.significant_labs).length) return [];
+    return Object.entries(summary.significant_labs).map(([test, value]) => ({
+      test,
+      value,
+      flag: '',
+      clinical_significance: '',
+    }));
   }
 }
 

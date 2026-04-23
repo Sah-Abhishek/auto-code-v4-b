@@ -10,6 +10,14 @@ export const config = {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || 'gpt-4o',
   },
+  gateway: {
+    baseUrl: process.env.ICD_GATEWAY_URL,
+    token: process.env.ICD_GATEWAY_TOKEN,
+    encounterType: process.env.ICD_GATEWAY_ENCOUNTER_TYPE || 'OUTPATIENT',
+    pollIntervalMs: parseInt(process.env.ICD_GATEWAY_POLL_INTERVAL_MS) || 10000,
+    pollTimeoutMs: parseInt(process.env.ICD_GATEWAY_POLL_TIMEOUT_MS) || 600000,
+    requestTimeoutMs: parseInt(process.env.ICD_GATEWAY_REQUEST_TIMEOUT_MS) || 120000,
+  },
   database: {
     url: process.env.DATABASE_URL,
   },

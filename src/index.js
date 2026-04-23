@@ -46,6 +46,9 @@ async function startServer() {
     await pool.query('SELECT NOW()');
     console.log('✅ Database connected');
 
+    // Idempotent migrations for additive columns (safe on fresh + existing DBs)
+    await pool.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS gateway_encounter JSONB`);
+
     // Start server and capture HTTP server instance for WebSocket
     const server = app.listen(config.port, async () => {
       console.log('\n' + '═'.repeat(50));
@@ -53,8 +56,7 @@ async function startServer() {
       console.log('═'.repeat(50));
       console.log(`🚀 Server: http://localhost:${config.port}`);
       console.log(`📡 API: http://localhost:${config.port}/api`);
-      console.log(`🔗 OCR: ${config.ocr.serviceUrl}`);
-      console.log(`🤖 AI Model: ${config.ai.model}`);
+      console.log(`🤖 ICD Gateway: ${config.gateway.baseUrl || '(not configured)'}`);
       console.log(`📦 Database: Connected`);
 
       // Initialize WebSocket

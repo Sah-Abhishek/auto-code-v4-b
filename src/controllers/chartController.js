@@ -1,6 +1,7 @@
 import { ChartRepository, DocumentRepository } from '../db/chartRepository.js';
 import { QueueService } from '../db/queueService.js';
 import { calculateSLAHours, calculateProcessingDuration } from '../utils/slaTracker.js';
+import { query as pgQuery } from '../db/connection.js';
 
 class ChartController {
 
@@ -110,6 +111,20 @@ class ChartController {
 
       const slaInfo = calculateProcessingDuration(chart.created_at, chart.processing_completed_at);
 
+      const isAdmin = req.auth?.role === 'admin';
+      let slaData = chart.sla_data;
+      let gatewayEncounter = chart.gateway_encounter;
+      if (!isAdmin) {
+        if (slaData && typeof slaData === 'object') {
+          const { pipeline_timing, ...rest } = slaData;
+          slaData = rest;
+        }
+        if (gatewayEncounter && typeof gatewayEncounter === 'object') {
+          const { pipeline_timing, ...rest } = gatewayEncounter;
+          gatewayEncounter = rest;
+        }
+      }
+
       res.json({
         success: true,
         chart: {
@@ -133,6 +148,9 @@ class ChartController {
           labResultsSummary: chart.lab_results_summary,
           codingNotes: chart.coding_notes,
 
+          // Gateway encounter (raw Step B5 payload, pipeline_timing stripped for non-admin)
+          gatewayEncounter,
+
           // Original AI codes (unmodified - for comparison)
           originalAICodes: chart.original_ai_codes,
 
@@ -149,8 +167,8 @@ class ChartController {
           lastErrorAt: chart.last_error_at,
           retryCount: chart.retry_count,
 
-          // SLA
-          slaData: chart.sla_data,
+          // SLA (pipeline_timing stripped for non-admin)
+          slaData,
           sla: slaInfo,
           processingStartedAt: chart.processing_started_at,
           processingCompletedAt: chart.processing_completed_at,
@@ -953,6 +971,79 @@ class ChartController {
         success: false,
         error: error.message
       });
+    }
+  }
+
+  /**
+   * Pipeline timing analytics from the ICD gateway (admin only).
+   * GET /api/charts/analytics/pipeline-timing
+   */
+  async getPipelineTiming(req, res) {
+    try {
+      const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+      const { rows } = await pgQuery(
+        `SELECT chart_number, facility, specialty, processing_completed_at,
+                gateway_encounter, sla_data
+         FROM charts
+         WHERE gateway_encounter IS NOT NULL
+            OR (sla_data IS NOT NULL AND sla_data ? 'pipeline_timing')
+         ORDER BY processing_completed_at DESC NULLS LAST
+         LIMIT $1`,
+        [limit]
+      );
+
+      const charts = rows.map(r => {
+        const t = r.gateway_encounter?.pipeline_timing || r.sla_data?.pipeline_timing || {};
+        return {
+          chartNumber: r.chart_number,
+          facility: r.facility,
+          specialty: r.specialty,
+          processingCompletedAt: r.processing_completed_at,
+          totalPipeline: typeof t.total_pipeline === 'number' ? t.total_pipeline : null,
+          steps: {
+            ocr_all: t.step_0_ocr_all ?? null,
+            consolidate: t.step_05_consolidate ?? null,
+            summarize: t.step_06_summarize ?? null,
+            coder_rules: t.step_1_coder_rules ?? null,
+            rag: t.step_2_rag ?? null,
+            corrections: t.step_3_corrections ?? null,
+            guidelines: t.step_4a_guidelines ?? null,
+            agent3: t.step_4b_agent3 ?? null,
+            mimic: t.step_5a_mimic ?? null,
+            agent4: t.step_5b_agent4 ?? null,
+            save: t.step_6_save ?? null,
+          },
+        };
+      });
+
+      const totals = charts.map(c => c.totalPipeline).filter(v => typeof v === 'number');
+      const sorted = [...totals].sort((a, b) => a - b);
+      const percentile = (p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : null;
+      const stepKeys = ['ocr_all', 'consolidate', 'summarize', 'coder_rules', 'rag', 'corrections', 'guidelines', 'agent3', 'mimic', 'agent4', 'save'];
+      const stepAverages = {};
+      for (const k of stepKeys) {
+        const vals = charts.map(c => c.steps[k]).filter(v => typeof v === 'number');
+        stepAverages[k] = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      }
+
+      res.json({
+        success: true,
+        summary: {
+          chartCount: totals.length,
+          totalPipeline: {
+            avg: totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : null,
+            min: totals.length ? Math.min(...totals) : null,
+            max: totals.length ? Math.max(...totals) : null,
+            p50: percentile(0.5),
+            p95: percentile(0.95),
+          },
+          stepAverages,
+        },
+        charts,
+      });
+    } catch (error) {
+      console.error('❌ Error fetching pipeline timing:', error);
+      res.status(500).json({ success: false, error: error.message });
     }
   }
 }
