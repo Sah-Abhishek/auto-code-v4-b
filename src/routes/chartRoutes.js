@@ -13,6 +13,7 @@ router.get('/stats/sla', requireAdmin, chartController.getSLAStats.bind(chartCon
 // Analytics endpoints (admin only)
 router.get('/analytics/modifications', requireAdmin, chartController.getModificationAnalytics.bind(chartController));
 router.get('/analytics/dashboard', requireAdmin, chartController.getDashboardAnalytics.bind(chartController));
+router.get('/analytics/pipeline-timing', requireAdmin, chartController.getPipelineTiming.bind(chartController));
 
 // Filter options
 router.get('/filters/facilities', chartController.getFacilities.bind(chartController));

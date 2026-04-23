@@ -10,14 +10,18 @@
 
 import { QueueService } from '../db/queueService.js';
 import { ChartRepository, DocumentRepository } from '../db/chartRepository.js';
-import { ocrService } from '../services/ocrService.js';
 import { aiService } from '../services/aiService.js';
 import { createSLATracker } from '../utils/slaTracker.js';
-import fs from 'fs';
-import path from 'path';
 import os from 'os';
 import axios from 'axios';
-import mammoth from 'mammoth';
+
+const DOC_TYPE_TO_REPORT_TYPE = {
+  'ed-notes': 'ED_NOTE',
+  'labs': 'LAB',
+  'radiology': 'RADIOLOGY',
+  'discharge': 'DISCHARGE_SUMMARY',
+};
+const mapReportType = (documentType) => DOC_TYPE_TO_REPORT_TYPE[documentType] || 'CLINIC_NOTE';
 
 // ═══════════════════════════════════════════════════════════════
 // LOGGING UTILITY
@@ -53,12 +57,6 @@ const log = {
     console.log('─'.repeat(50));
   }
 };
-
-// Word document MIME types
-const WORD_MIME_TYPES = [
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-];
 
 class DocumentWorker {
   constructor() {
@@ -142,128 +140,55 @@ class DocumentWorker {
       await QueueService.notifyStatusChange(job.job_id, 'processing', 'processing', `Processing chart ${chartNumber}`);
 
       // ═══════════════════════════════════════════════════════════════
-      // PHASE 1: TEXT EXTRACTION (OCR for PDFs/images, direct for text/Word)
+      // PHASE 1: DOWNLOAD FILES FROM S3 (gateway handles OCR itself)
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
-      log.info('OCR_START', `Starting text extraction for ${documents.length} document(s)`);
+      log.info('DOWNLOAD_START', `Downloading ${documents.length} file(s) from S3 for gateway`);
       sla.markOCRStarted();
-      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ocr_started', `Starting text extraction for ${documents.length} document(s)`);
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'download_started', `Downloading ${documents.length} document(s) for gateway`);
 
-      const ocrResults = [];
-      let ocrSuccessCount = 0;
-      let ocrFailCount = 0;
-      let textFileCount = 0;
-      let wordFileCount = 0;
-
+      const gatewayDocs = [];
+      const failedDownloads = [];
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
-        log.info('OCR_PROCESS', `Processing document ${i + 1}/${documents.length}: ${doc.originalName}`);
-
+        log.info('DOWNLOAD', `File ${i + 1}/${documents.length}: ${doc.originalName}`);
         try {
-          let ocrResult;
-
-          // Check if this is a plain text file - skip OCR and read content directly
-          if (doc.mimeType === 'text/plain') {
-            textFileCount++;
-            log.info('TEXT_FILE', `Skipping OCR for text file: ${doc.originalName}`);
-            ocrResult = await this.extractTextFile(doc);
-          }
-          // Check if this is a Word document - extract text using mammoth
-          else if (WORD_MIME_TYPES.includes(doc.mimeType)) {
-            wordFileCount++;
-            log.info('WORD_FILE', `Extracting text from Word document: ${doc.originalName}`);
-            ocrResult = await this.extractWordDocument(doc);
-          }
-          // Perform OCR for PDFs and images
-          else {
-            ocrResult = await this.performOCR(doc);
-          }
-
-          if (ocrResult.success) {
-            ocrSuccessCount++;
-            log.success('OCR_COMPLETE', `Document: ${doc.originalName}`, {
-              processingTime: `${ocrResult.processingTime}ms`,
-              textLength: typeof ocrResult.extractedText === 'string'
-                ? ocrResult.extractedText.length
-                : JSON.stringify(ocrResult.extractedText).length,
-              isTextFile: doc.mimeType === 'text/plain',
-              isWordFile: WORD_MIME_TYPES.includes(doc.mimeType)
-            });
-
-            // Update document with OCR text
-            await DocumentRepository.updateOCRResults(
-              doc.documentId,
-              typeof ocrResult.extractedText === 'string'
-                ? ocrResult.extractedText
-                : JSON.stringify(ocrResult.extractedText),
-              ocrResult.processingTime
-            );
-
-            ocrResults.push({
-              ...ocrResult,
-              documentId: doc.documentId,
-              s3Url: doc.s3Url,
-              filename: doc.originalName,
-              documentType: doc.documentType
-            });
-
-          } else {
-            ocrFailCount++;
-            log.error('OCR_FAILED', `Document: ${doc.originalName}`, { message: ocrResult.error });
-
-            await DocumentRepository.markOCRFailed(doc.documentId, ocrResult.error);
-
-            ocrResults.push({
-              success: false,
-              documentId: doc.documentId,
-              s3Url: doc.s3Url,
-              filename: doc.originalName,
-              documentType: doc.documentType,
-              error: ocrResult.error
-            });
-          }
-        } catch (ocrError) {
-          ocrFailCount++;
-          log.error('OCR_EXCEPTION', `Document: ${doc.originalName}`, ocrError);
-
-          await DocumentRepository.markOCRFailed(doc.documentId, ocrError.message);
-
-          ocrResults.push({
-            success: false,
+          const response = await axios.get(doc.s3Url, { responseType: 'arraybuffer', timeout: 60000 });
+          gatewayDocs.push({
             documentId: doc.documentId,
+            buffer: Buffer.from(response.data),
             filename: doc.originalName,
-            error: ocrError.message
+            mimeType: doc.mimeType,
+            reportType: mapReportType(doc.documentType),
           });
+        } catch (dlError) {
+          log.error('DOWNLOAD_FAILED', `${doc.originalName}: ${dlError.message}`);
+          failedDownloads.push({ filename: doc.originalName, error: dlError.message });
+          await DocumentRepository.markOCRFailed(doc.documentId, `S3 download failed: ${dlError.message}`);
         }
       }
 
       sla.markOCRCompleted();
-      log.info('OCR_SUMMARY', `Text Extraction Complete: ${ocrSuccessCount} success, ${ocrFailCount} failed, ${textFileCount} text files, ${wordFileCount} Word files (no OCR needed)`);
-      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ocr_completed', `Text extraction complete: ${ocrSuccessCount} success, ${ocrFailCount} failed`);
+      log.info('DOWNLOAD_SUMMARY', `Downloaded ${gatewayDocs.length}/${documents.length} files`);
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'download_completed', `Downloaded ${gatewayDocs.length}/${documents.length} files`);
 
-      const successfulOCR = ocrResults.filter(r => r.success);
-
-      if (successfulOCR.length === 0) {
-        throw new Error(`All text extraction failed (${ocrFailCount} documents)`);
+      if (gatewayDocs.length === 0) {
+        throw new Error(`All S3 downloads failed (${failedDownloads.length} documents)`);
       }
 
       // ═══════════════════════════════════════════════════════════════
-      // PHASE 2: AI CODING ANALYSIS
+      // PHASE 2: ICD PREDICTOR GATEWAY (encounter flow B1→B5)
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
-      log.info('AI_START', `Starting AI analysis for chart ${chartNumber}`);
-      log.info('AI_START', `Documents for AI: ${successfulOCR.length}`);
+      log.info('AI_START', `Starting gateway encounter pipeline for chart ${chartNumber}`);
+      log.info('AI_START', `Documents for gateway: ${gatewayDocs.length}`);
       sla.markAIStarted();
-      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_started', `Starting AI analysis with ${successfulOCR.length} document(s)`);
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_started', `Starting gateway pipeline with ${gatewayDocs.length} document(s)`);
 
       let aiResult;
       try {
-        const formattedDocs = ocrService.formatForAI(ocrResults);
-        log.info('AI_PROCESS', `Formatted ${formattedDocs.length} documents for AI`);
-        log.info('AI_PROCESS', `Sending to AI service...`);
-
         const aiStartTime = Date.now();
-        aiResult = await aiService.processForCoding(formattedDocs, chartInfo);
+        aiResult = await aiService.processForCoding(gatewayDocs, chartInfo);
         const aiDuration = Date.now() - aiStartTime;
 
         log.info('AI_RESPONSE', `AI responded in ${aiDuration}ms`);
@@ -305,31 +230,10 @@ class DocumentWorker {
       }
 
       sla.markAICompleted();
-      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_completed', 'AI analysis complete');
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_completed', 'Gateway pipeline complete');
 
       // ═══════════════════════════════════════════════════════════════
-      // PHASE 3: DOCUMENT SUMMARIES (Optional - don't fail if this fails)
-      // ═══════════════════════════════════════════════════════════════
-      log.subDivider();
-      log.info('SUMMARY_START', `Generating document summaries`);
-
-      let summaryCount = 0;
-      for (const ocrResult of successfulOCR) {
-        try {
-          const docSummary = await aiService.generateDocumentSummary(ocrResult, chartInfo);
-          if (docSummary.success) {
-            await DocumentRepository.updateAISummary(ocrResult.documentId, docSummary.data);
-            summaryCount++;
-          }
-        } catch (summaryError) {
-          log.warn('SUMMARY_SKIP', `Summary failed for ${ocrResult.filename}: ${summaryError.message}`);
-        }
-      }
-
-      log.info('SUMMARY_COMPLETE', `Generated ${summaryCount}/${successfulOCR.length} summaries`);
-
-      // ═══════════════════════════════════════════════════════════════
-      // PHASE 4: SAVE RESULTS
+      // PHASE 3: SAVE RESULTS
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
       log.info('SAVE_START', `Saving AI results to database`);
@@ -425,194 +329,6 @@ class DocumentWorker {
 
     } catch (handlingError) {
       log.error('FAILURE_HANDLING', `Error while handling failure`, handlingError);
-    }
-  }
-
-  /**
-   * Extract text from a plain text file (no OCR needed)
-   * Downloads from S3 and reads the content directly
-   */
-  async extractTextFile(doc) {
-    const startTime = Date.now();
-
-    try {
-      log.info('TEXT_DOWNLOAD', `Downloading text file from S3: ${doc.s3Url?.substring(0, 80)}...`);
-
-      // Download file from S3
-      const response = await axios.get(doc.s3Url, {
-        responseType: 'text',
-        timeout: 30000
-      });
-
-      const textContent = response.data;
-      const processingTime = Date.now() - startTime;
-
-      log.success('TEXT_EXTRACT', `Text file extracted: ${textContent.length} characters in ${processingTime}ms`);
-
-      // Format text with line numbers for consistency with OCR output
-      const lines = textContent.split('\n');
-      const formattedLines = lines.map((line, index) => ({
-        lineNumber: index + 1,
-        text: line.trim()
-      })).filter(line => line.text.length > 0);
-
-      return {
-        success: true,
-        filename: doc.originalName,
-        documentType: doc.documentType || 'clinical-text',
-        extractedText: formattedLines,
-        rawText: textContent,
-        processingTime,
-        isTextFile: true
-      };
-
-    } catch (error) {
-      log.error('TEXT_ERROR', `Failed to extract text file: ${doc.originalName}`, error);
-      return {
-        success: false,
-        filename: doc.originalName,
-        documentType: doc.documentType,
-        error: error.message,
-        processingTime: Date.now() - startTime
-      };
-    }
-  }
-
-  /**
-   * Extract text from a Word document (.doc, .docx)
-   * Downloads from S3 and extracts text using mammoth
-   */
-  async extractWordDocument(doc) {
-    const startTime = Date.now();
-    let tempPath = null;
-
-    try {
-      log.info('WORD_DOWNLOAD', `Downloading Word document from S3: ${doc.s3Url?.substring(0, 80)}...`);
-
-      // Download file from S3
-      const response = await axios.get(doc.s3Url, {
-        responseType: 'arraybuffer',
-        timeout: 60000
-      });
-
-      log.info('WORD_DOWNLOAD', `Downloaded ${(response.data.length / 1024).toFixed(1)}KB`);
-
-      // Create temp file for mammoth
-      const tempDir = os.tmpdir();
-      const safeFilename = doc.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-      tempPath = path.join(tempDir, `word_${Date.now()}_${safeFilename}`);
-      fs.writeFileSync(tempPath, Buffer.from(response.data));
-
-      log.info('WORD_EXTRACT', `Extracting text from Word document...`);
-
-      // Extract text using mammoth
-      const result = await mammoth.extractRawText({ path: tempPath });
-      const textContent = result.value;
-      const processingTime = Date.now() - startTime;
-
-      // Log any warnings from mammoth
-      if (result.messages && result.messages.length > 0) {
-        result.messages.forEach(msg => {
-          if (msg.type === 'warning') {
-            log.warn('WORD_EXTRACT', `Mammoth warning: ${msg.message}`);
-          }
-        });
-      }
-
-      log.success('WORD_EXTRACT', `Word document extracted: ${textContent.length} characters in ${processingTime}ms`);
-
-      // Format text with line numbers for consistency with OCR output
-      const lines = textContent.split('\n');
-      const formattedLines = lines.map((line, index) => ({
-        lineNumber: index + 1,
-        text: line.trim()
-      })).filter(line => line.text.length > 0);
-
-      return {
-        success: true,
-        filename: doc.originalName,
-        documentType: doc.documentType || 'word-document',
-        extractedText: formattedLines,
-        rawText: textContent,
-        processingTime,
-        isWordFile: true
-      };
-
-    } catch (error) {
-      log.error('WORD_ERROR', `Failed to extract Word document: ${doc.originalName}`, error);
-      return {
-        success: false,
-        filename: doc.originalName,
-        documentType: doc.documentType,
-        error: error.message,
-        processingTime: Date.now() - startTime
-      };
-    } finally {
-      // Clean up temp file
-      if (tempPath) {
-        try {
-          fs.unlinkSync(tempPath);
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-      }
-    }
-  }
-
-  /**
-   * Perform OCR on a document (PDF or image)
-   */
-  async performOCR(doc) {
-    const startTime = Date.now();
-    let tempPath = null;
-
-    try {
-      log.info('OCR_DOWNLOAD', `Downloading from S3: ${doc.s3Url?.substring(0, 80)}...`);
-
-      // Download file from S3
-      const response = await axios.get(doc.s3Url, {
-        responseType: 'arraybuffer',
-        timeout: 60000
-      });
-
-      log.info('OCR_DOWNLOAD', `Downloaded ${(response.data.length / 1024).toFixed(1)}KB`);
-
-      // Create temp file
-      const tempDir = os.tmpdir();
-      const safeFilename = doc.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-      tempPath = path.join(tempDir, `ocr_${Date.now()}_${safeFilename}`);
-      fs.writeFileSync(tempPath, response.data);
-
-      const tempFile = {
-        path: tempPath,
-        originalname: doc.originalName,
-        mimetype: doc.mimeType
-      };
-
-      log.info('OCR_EXTRACT', `Running OCR extraction...`);
-
-      // Run OCR
-      const ocrResult = await ocrService.extractText(tempFile, doc.documentType);
-
-      return ocrResult;
-
-    } catch (error) {
-      log.error('OCR_ERROR', `OCR failed for ${doc.originalName}`, error);
-      return {
-        success: false,
-        filename: doc.originalName,
-        documentType: doc.documentType,
-        error: error.message,
-        processingTime: Date.now() - startTime
-      };
-    } finally {
-      if (tempPath) {
-        try {
-          fs.unlinkSync(tempPath);
-        } catch (e) {
-          // Ignore cleanup errors
-        }
-      }
     }
   }
 
