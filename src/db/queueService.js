@@ -152,26 +152,38 @@ export const QueueService = {
     const { attempts, max_attempts } = currentJob.rows[0];
     const willRetry = attempts < max_attempts;
 
-    // Calculate retry_after if we'll retry
-    let retryAfter = null;
+    // retry_after is computed in SQL (DB clock) so it's comparable to NOW()
+    // in claimNextJob — avoids stuck jobs when app and DB clocks drift apart.
+    let result;
     if (willRetry) {
       const delayMs = this.getRetryDelay(attempts);
-      retryAfter = new Date(Date.now() + delayMs);
+      result = await query(
+        `UPDATE processing_queue SET
+          status = 'failed',
+          error_message = $2,
+          locked_at = NULL,
+          retry_after = NOW() + make_interval(secs => $3::double precision / 1000)
+         WHERE job_id = $1
+         RETURNING *`,
+        [jobId, errorMessage, delayMs]
+      );
+    } else {
+      result = await query(
+        `UPDATE processing_queue SET
+          status = 'failed',
+          error_message = $2,
+          locked_at = NULL,
+          retry_after = NULL
+         WHERE job_id = $1
+         RETURNING *`,
+        [jobId, errorMessage]
+      );
     }
 
-    const result = await query(
-      `UPDATE processing_queue SET 
-        status = 'failed',
-        error_message = $2,
-        locked_at = NULL,
-        retry_after = $3
-       WHERE job_id = $1
-       RETURNING *`,
-      [jobId, errorMessage, retryAfter]
-    );
+    const job = result.rows[0];
+    const retryAfter = job?.retry_after || null;
 
-    if (result.rows[0]) {
-      const job = result.rows[0];
+    if (job) {
       if (!willRetry) {
         console.log(`❌ Job permanently failed: ${jobId} (${job.attempts}/${job.max_attempts} attempts)`);
       } else {
@@ -181,7 +193,7 @@ export const QueueService = {
     }
 
     return {
-      ...result.rows[0],
+      ...job,
       willRetry,
       retryAfter,
       isPermanentlyFailed: !willRetry
@@ -290,19 +302,17 @@ export const QueueService = {
    * UPDATED: Sets retry_after for released jobs
    */
   async releaseStuckJobs(stuckMinutes = 30) {
-    const retryAfter = new Date(Date.now() + 30000); // Retry in 30 seconds
-
     const result = await query(
-      `UPDATE processing_queue SET 
+      `UPDATE processing_queue SET
         status = 'failed',
         worker_id = NULL,
         locked_at = NULL,
         error_message = 'Released: worker timeout after ' || $1 || ' minutes',
-        retry_after = $2
+        retry_after = NOW() + INTERVAL '30 seconds'
        WHERE status = 'processing'
        AND locked_at < NOW() - INTERVAL '1 minute' * $1
        RETURNING *`,
-      [stuckMinutes, retryAfter]
+      [stuckMinutes]
     );
 
     if (result.rows.length > 0) {
