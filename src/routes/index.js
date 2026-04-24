@@ -6,6 +6,26 @@ import adminRoutes from './adminRoutes.js';
 
 const router = Router();
 
+// Bump this whenever the API contract changes so clients can verify
+// which build is actually running.
+const API_VERSION = '1.2.0-admin-corrections';
+const BUILD_FEATURES = [
+  'admin-account-profile',
+  'admin-account-charts',
+  'admin-account-corrections',
+  'analytics-by-category'
+];
+
+router.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'MedCode AI Backend',
+    version: API_VERSION,
+    features: BUILD_FEATURES,
+    time: new Date().toISOString()
+  });
+});
+
 router.use('/auth', authRoutes);
 router.use('/admin', adminRoutes);
 router.use('/documents', documentRoutes);
@@ -14,9 +34,11 @@ router.use('/charts', chartRoutes);
 router.get('/', (req, res) => {
   res.json({
     service: 'MedCode AI Backend',
-    version: '1.1.0',
+    version: API_VERSION,
+    features: BUILD_FEATURES,
     mode: 'async-queue',
     endpoints: {
+      health: 'GET /api/health',
       documents: {
         process: 'POST /api/documents/process',
         status: 'GET /api/documents/status/:chartNumber',
