@@ -587,13 +587,25 @@ class ChartController {
       `);
 
       // Calculate AI accuracy at code level
-      const categories = ['ed_em_level', 'procedures', 'primary_diagnosis', 'secondary_diagnoses', 'modifiers'];
+      const categories = ['reason_for_admit', 'ed_em_level', 'primary_diagnosis', 'secondary_diagnoses', 'procedures', 'modifiers'];
+      const categoryLabels = {
+        reason_for_admit: 'Admit Reason',
+        ed_em_level: 'ED E&M Level',
+        primary_diagnosis: 'Primary Diagnosis',
+        secondary_diagnoses: 'Secondary Diagnoses',
+        procedures: 'Procedures',
+        modifiers: 'Modifiers'
+      };
 
       let totalAICodes = 0;
       let modifiedCodes = 0;
       let rejectedCodes = 0;
       let addedCodes = 0;
       const reasonCounts = {};
+      const categoryStats = {};
+      for (const cat of categories) {
+        categoryStats[cat] = { total: 0, modified: 0, rejected: 0, added: 0 };
+      }
 
       // Track weekly data for trends
       const weeklyData = {};
@@ -628,6 +640,7 @@ class ChartController {
 
           totalAICodes += originalInCategory;
           chartTotalCodes += originalInCategory;
+          categoryStats[category].total += originalInCategory;
 
           const categoryMods = Array.isArray(modifications[category])
             ? modifications[category]
@@ -637,17 +650,20 @@ class ChartController {
             if (mod.action === 'modified') {
               modifiedCodes++;
               chartModified++;
+              categoryStats[category].modified++;
               if (mod.reason) {
                 reasonCounts[mod.reason] = (reasonCounts[mod.reason] || 0) + 1;
               }
             } else if (mod.action === 'rejected') {
               rejectedCodes++;
               chartRejected++;
+              categoryStats[category].rejected++;
               if (mod.reason) {
                 reasonCounts[mod.reason] = (reasonCounts[mod.reason] || 0) + 1;
               }
             } else if (mod.action === 'added') {
               addedCodes++;
+              categoryStats[category].added++;
             }
           }
         }
@@ -772,6 +788,25 @@ class ChartController {
       const slaWithin = parseInt(slaCompliance.rows[0]?.within_sla || 0);
       const slaComplianceRate = slaTotal > 0 ? (slaWithin / slaTotal * 100) : 0;
 
+      // Per-category AI accuracy breakdown
+      const byCategory = categories.map(cat => {
+        const s = categoryStats[cat];
+        const unchanged = Math.max(0, s.total - s.modified - s.rejected);
+        const accuracy = s.total > 0 ? (unchanged / s.total) * 100 : 0;
+        const correctionRateCat = s.total > 0 ? ((s.modified + s.rejected) / s.total) * 100 : 0;
+        return {
+          key: cat,
+          label: categoryLabels[cat],
+          totalAICodes: s.total,
+          unchangedCodes: unchanged,
+          modifiedCodes: s.modified,
+          rejectedCodes: s.rejected,
+          addedCodes: s.added,
+          accuracy: parseFloat(accuracy.toFixed(1)),
+          correctionRate: parseFloat(correctionRateCat.toFixed(1))
+        };
+      });
+
       // Format correction reasons
       const totalReasonCount = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
       const sortedReasons = Object.entries(reasonCounts)
@@ -872,6 +907,7 @@ class ChartController {
             week: t.week,
             accuracy: t.accuracy
           })),
+          byCategory,
           volumeByFacility: volumeByFacility.rows.map(r => ({
             facility: r.facility,
             count: parseInt(r.chart_count)

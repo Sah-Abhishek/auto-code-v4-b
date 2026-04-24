@@ -2,8 +2,18 @@ import { Router } from 'express';
 import { AccessRepository } from '../db/accessRepository.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 import { sendAccessCodeEmail } from '../services/emailService.js';
+import { query } from '../db/connection.js';
 
 const router = Router();
+
+const CORRECTION_CATEGORIES = [
+  { key: 'reason_for_admit', label: 'Admit Reason' },
+  { key: 'ed_em_level', label: 'ED E&M Level' },
+  { key: 'primary_diagnosis', label: 'Primary Diagnosis' },
+  { key: 'secondary_diagnoses', label: 'Secondary Diagnoses' },
+  { key: 'procedures', label: 'Procedures' },
+  { key: 'modifiers', label: 'Modifiers' }
+];
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -111,6 +121,171 @@ router.get('/analytics', async (req, res) => {
     const analytics = await AccessRepository.getAnalytics();
     res.json({ success: true, analytics });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/accounts/:code', async (req, res) => {
+  try {
+    const account = await AccessRepository.findByCode(req.params.code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+    const now = new Date();
+    let status = 'active';
+    if (account.revoked) status = 'revoked';
+    else if (new Date(account.valid_until) < now) status = 'expired';
+    else if (account.process_used >= account.process_limit) status = 'exhausted';
+
+    res.json({
+      success: true,
+      account: {
+        code: account.code,
+        clientName: account.client_name,
+        speciality: account.speciality,
+        userName: account.user_name,
+        designation: account.designation,
+        email: account.email,
+        processLimit: account.process_limit,
+        processUsed: account.process_used,
+        processRemaining: Math.max(0, account.process_limit - account.process_used),
+        validDays: account.valid_days,
+        validUntil: account.valid_until,
+        revoked: account.revoked,
+        revokedAt: account.revoked_at,
+        lastLoginAt: account.last_login_at,
+        createdAt: account.created_at,
+        status
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/accounts/:code/charts', async (req, res) => {
+  try {
+    const { code } = req.params;
+    const account = await AccessRepository.findByCode(code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+    const result = await query(
+      `SELECT
+         c.id, c.chart_number, c.mrn, c.facility, c.specialty, c.date_of_service,
+         c.provider, c.document_count, c.ai_status, c.review_status,
+         c.submitted_at, c.submitted_by, c.created_at, c.updated_at,
+         c.user_modifications
+       FROM charts c
+       WHERE c.owner_code = $1
+       ORDER BY c.created_at DESC`,
+      [code]
+    );
+
+    const charts = result.rows.map(r => {
+      const mods = r.user_modifications || {};
+      let correctionCount = 0;
+      for (const { key } of CORRECTION_CATEGORIES) {
+        if (Array.isArray(mods[key])) correctionCount += mods[key].length;
+      }
+      return {
+        id: r.id,
+        chartNumber: r.chart_number,
+        mrn: r.mrn,
+        facility: r.facility,
+        specialty: r.specialty,
+        dateOfService: r.date_of_service,
+        provider: r.provider,
+        documentCount: r.document_count,
+        aiStatus: r.ai_status,
+        reviewStatus: r.review_status,
+        submittedAt: r.submitted_at,
+        submittedBy: r.submitted_by,
+        correctionCount,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      };
+    });
+
+    res.json({ success: true, charts });
+  } catch (err) {
+    console.error('Admin list charts failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/accounts/:code/corrections', async (req, res) => {
+  try {
+    const { code } = req.params;
+    const account = await AccessRepository.findByCode(code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+    const result = await query(
+      `SELECT chart_number, mrn, facility, specialty, submitted_at, submitted_by,
+              user_modifications
+       FROM charts
+       WHERE owner_code = $1
+         AND user_modifications IS NOT NULL
+       ORDER BY COALESCE(submitted_at, updated_at) DESC`,
+      [code]
+    );
+
+    const byCategory = {};
+    for (const { key, label } of CORRECTION_CATEGORIES) {
+      byCategory[key] = {
+        key,
+        label,
+        total: 0,
+        actions: { modified: 0, rejected: 0, added: 0 },
+        items: []
+      };
+    }
+
+    for (const row of result.rows) {
+      const mods = row.user_modifications || {};
+      for (const { key } of CORRECTION_CATEGORIES) {
+        const entries = Array.isArray(mods[key]) ? mods[key] : [];
+        for (const entry of entries) {
+          byCategory[key].total += 1;
+          const action = entry.action || 'modified';
+          if (byCategory[key].actions[action] !== undefined) {
+            byCategory[key].actions[action] += 1;
+          }
+          byCategory[key].items.push({
+            chartNumber: row.chart_number,
+            mrn: row.mrn,
+            facility: row.facility,
+            specialty: row.specialty,
+            submittedAt: row.submitted_at,
+            submittedBy: row.submitted_by,
+            action,
+            reason: entry.reason || null,
+            comment: entry.comment || null,
+            original: entry.original || null,
+            modified: entry.modified || entry.added || null
+          });
+        }
+      }
+    }
+
+    const categories = CORRECTION_CATEGORIES.map(({ key }) => byCategory[key]);
+    const totals = categories.reduce(
+      (acc, c) => {
+        acc.total += c.total;
+        acc.modified += c.actions.modified;
+        acc.rejected += c.actions.rejected;
+        acc.added += c.actions.added;
+        return acc;
+      },
+      { total: 0, modified: 0, rejected: 0, added: 0 }
+    );
+
+    res.json({
+      success: true,
+      chartsWithCorrections: result.rows.length,
+      totals,
+      categories
+    });
+  } catch (err) {
+    console.error('Admin list corrections failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
