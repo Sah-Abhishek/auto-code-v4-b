@@ -552,12 +552,34 @@ class ChartController {
   async getDashboardAnalytics(req, res) {
     try {
       const { query } = await import('../db/connection.js');
-      const { period = '30' } = req.query;
+      const { period = '30', client = '', specialty = '' } = req.query;
       const periodDays = parseInt(period);
+
+      // Build dynamic filter clause for client/specialty.
+      // Each query receives its own params array — placeholder indices restart per query.
+      const buildFilter = (startIdx = 1) => {
+        const clauses = [];
+        const params = [];
+        let idx = startIdx;
+        if (specialty && specialty !== 'all') {
+          clauses.push(`specialty = $${idx++}`);
+          params.push(specialty);
+        }
+        if (client && client !== 'all') {
+          clauses.push(`owner_code IN (SELECT code FROM access_accounts WHERE client_name = $${idx++})`);
+          params.push(client);
+        }
+        return {
+          sql: clauses.length > 0 ? ' AND ' + clauses.join(' AND ') : '',
+          params
+        };
+      };
+
+      const filter = buildFilter();
 
       // Get overall stats
       const overallStats = await query(`
-        SELECT 
+        SELECT
           COUNT(*) as total_charts,
           COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted_charts,
           COUNT(*) FILTER (WHERE review_status = 'pending') as pending_charts,
@@ -568,11 +590,12 @@ class ChartController {
           COUNT(*) FILTER (WHERE ai_status = 'retry_pending') as retry_pending_charts,
           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${periodDays} days') as charts_in_period
         FROM charts
-      `);
+        WHERE 1=1${filter.sql}
+      `, filter.params);
 
       // Get submitted charts with original codes and modifications for CODE-LEVEL accuracy
       const submittedChartsData = await query(`
-        SELECT 
+        SELECT
           original_ai_codes,
           user_modifications,
           final_codes,
@@ -581,10 +604,10 @@ class ChartController {
           submitted_at,
           processing_started_at,
           processing_completed_at
-        FROM charts 
+        FROM charts
         WHERE review_status = 'submitted'
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
+        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'${filter.sql}
+      `, filter.params);
 
       // Calculate AI accuracy at code level
       const categories = ['reason_for_admit', 'ed_em_level', 'primary_diagnosis', 'secondary_diagnoses', 'procedures', 'modifiers'];
@@ -698,31 +721,31 @@ class ChartController {
 
       // Volume by facility
       const volumeByFacility = await query(`
-        SELECT 
+        SELECT
           facility,
           COUNT(*) as chart_count
         FROM charts
         WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
-        AND facility IS NOT NULL AND facility != ''
+        AND facility IS NOT NULL AND facility != ''${filter.sql}
         GROUP BY facility
         ORDER BY chart_count DESC
         LIMIT 10
-      `);
+      `, filter.params);
 
       // Get processing times
       const processingTimes = await query(`
-        SELECT 
+        SELECT
           AVG(EXTRACT(EPOCH FROM (processing_completed_at - processing_started_at))/60) as avg_processing_min,
           AVG(EXTRACT(EPOCH FROM (submitted_at - processing_completed_at))/60) as avg_review_min
         FROM charts
         WHERE review_status = 'submitted'
         AND processing_completed_at IS NOT NULL
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
+        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'${filter.sql}
+      `, filter.params);
 
       // Get SLA compliance
       const slaCompliance = await query(`
-        SELECT 
+        SELECT
           COUNT(*) as total,
           COUNT(*) FILTER (
             WHERE EXTRACT(EPOCH FROM (submitted_at - processing_completed_at))/3600 <= 24
@@ -730,16 +753,16 @@ class ChartController {
         FROM charts
         WHERE review_status = 'submitted'
         AND processing_completed_at IS NOT NULL
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
+        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'${filter.sql}
+      `, filter.params);
 
       // Get charts per day average
       const chartsPerDay = await query(`
-        SELECT 
+        SELECT
           COUNT(*)::float / NULLIF(${periodDays}, 0) as avg_per_day
         FROM charts
-        WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
+        WHERE created_at >= NOW() - INTERVAL '${periodDays} days'${filter.sql}
+      `, filter.params);
 
       // Specialty accuracy
       const specialtyData = {};
@@ -952,6 +975,26 @@ class ChartController {
       res.json({
         success: true,
         facilities: result.rows.map(r => r.facility)
+      });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  }
+
+  /**
+   * Get distinct client names
+   * GET /api/charts/filters/clients
+   */
+  async getClients(req, res) {
+    try {
+      const { query } = await import('../db/connection.js');
+      const result = await query(
+        `SELECT DISTINCT client_name FROM access_accounts WHERE client_name IS NOT NULL AND client_name != '' ORDER BY client_name`
+      );
+
+      res.json({
+        success: true,
+        clients: result.rows.map(r => r.client_name)
       });
     } catch (error) {
       res.status(500).json({ success: false, error: error.message });

@@ -18,6 +18,7 @@ router.get('/analytics/pipeline-timing', requireAdmin, chartController.getPipeli
 // Filter options
 router.get('/filters/facilities', chartController.getFacilities.bind(chartController));
 router.get('/filters/specialties', chartController.getSpecialties.bind(chartController));
+router.get('/filters/clients', requireAdmin, chartController.getClients.bind(chartController));
 
 // ═══════════════════════════════════════════════════════════════
 // DEBUG ENDPOINT - get raw data from database with code analysis
