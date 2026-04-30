@@ -77,15 +77,26 @@ class DocumentWorker {
     process.on('SIGTERM', () => this.shutdown());
     process.on('SIGINT', () => this.shutdown());
 
-    // Release stuck jobs on startup
-    try {
-      const stuckJobs = await QueueService.releaseStuckJobs(30);
-      if (stuckJobs.length > 0) {
-        log.warn('WORKER', `Released ${stuckJobs.length} stuck jobs on startup`);
+    // Release stuck jobs on startup. Threshold is just above the gateway poll
+    // timeout (10 min) plus a small buffer so anything still 'processing' past
+    // 15 min is unambiguously orphaned.
+    const STUCK_THRESHOLD_MIN = 15;
+    const tryReleaseStuck = async (where) => {
+      try {
+        const released = await QueueService.releaseStuckJobs(STUCK_THRESHOLD_MIN);
+        if (released.length > 0) {
+          log.warn('WORKER', `${where}: released ${released.length} orphaned job(s) (>${STUCK_THRESHOLD_MIN}m old)`);
+        }
+      } catch (error) {
+        log.error('WORKER', `${where}: failed to release orphaned jobs`, error);
       }
-    } catch (error) {
-      log.error('WORKER', 'Failed to release stuck jobs', error);
-    }
+    };
+    await tryReleaseStuck('startup');
+
+    // Periodic sweep so a worker that died mid-job during this worker's lifetime
+    // gets recovered without waiting for the next restart.
+    this._stuckSweep = setInterval(() => tryReleaseStuck('periodic'), 60_000);
+    this._stuckSweep.unref?.();
 
     // Main processing loop
     while (this.isRunning) {
@@ -341,6 +352,10 @@ class DocumentWorker {
     log.warn('WORKER', 'Shutdown requested, finishing current job...');
     this.shutdownRequested = true;
     this.isRunning = false;
+    if (this._stuckSweep) {
+      clearInterval(this._stuckSweep);
+      this._stuckSweep = null;
+    }
   }
 }
 

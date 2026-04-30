@@ -185,15 +185,15 @@ class WebSocketService {
     });
 
     await this.pgClient.connect();
-    await this.pgClient.query('LISTEN job_status_update');
+    await this.pgClient.query('LISTEN medcode_job_status_update');
 
     this.pgClient.on('notification', (msg) => {
-      if (msg.channel === 'job_status_update') {
+      if (msg.channel === 'medcode_job_status_update') {
         this._handleNotification(msg.payload);
       }
     });
 
-    console.log('👂 PG LISTEN active on channel: job_status_update');
+    console.log('👂 PG LISTEN active on channel: medcode_job_status_update');
   }
 
   /**

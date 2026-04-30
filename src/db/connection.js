@@ -11,8 +11,12 @@ export const pool = new Pool({
   connectionString: config.database.url
 });
 
-// Test connection
-pool.on('connect', () => {
+// Pin every new connection to the medcode schema so unqualified table
+// references resolve there, isolating us from other services on this DB.
+pool.on('connect', (client) => {
+  client.query('SET search_path TO medcode, public').catch((err) => {
+    console.error('❌ Failed to set search_path:', err.message);
+  });
   console.log('📦 Database connected');
 });
 

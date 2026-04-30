@@ -357,7 +357,7 @@ export const QueueService = {
       timestamp: new Date().toISOString()
     });
 
-    await query(`SELECT pg_notify('job_status_update', $1)`, [payload]);
+    await query(`SELECT pg_notify('medcode_job_status_update', $1)`, [payload]);
   },
 
   /**

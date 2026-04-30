@@ -76,6 +76,7 @@ class AIService {
     };
     const { data } = await this.client.post('/api/encounters', body);
     if (!data?.id) throw new Error('Gateway B1: missing encounter id in response');
+    console.log(`[Gateway B1] encounter_id=${data.id} mrn=${body.mrn}`);
     return data;
   }
 
@@ -104,21 +105,37 @@ class AIService {
   async runPipeline(encounterId) {
     const { data } = await this.client.post(`/api/encounters/${encounterId}/run`, {});
     if (!data?.task_id) throw new Error('Gateway B3: missing task_id in response');
+    console.log(`[Gateway B3] task_id=${data.task_id} encounter_id=${encounterId}`);
     return data;
   }
 
   async pollUntilDone(encounterId, taskId) {
+    // The gateway is inconsistent across endpoints/versions about which terminal
+    // status string it returns: task-status returns SUCCESS, encounter-status
+    // returns COMPLETE, and we've seen COMPLETED elsewhere. Be liberal.
+    const SUCCESS = new Set(['SUCCESS', 'COMPLETE', 'COMPLETED', 'DONE', 'FINISHED']);
+    const FAILURE = new Set(['FAILURE', 'FAILED', 'ERROR', 'CANCELED', 'CANCELLED']);
+
     const start = Date.now();
+    let lastStatus = null;
+    let pollCount = 0;
     while (Date.now() - start < this.pollTimeoutMs) {
       const { data } = await this.client.get(`/api/encounters/${encounterId}/status/${taskId}`);
-      const status = data?.status;
-      if (status === 'SUCCESS') return data;
-      if (status === 'FAILURE' || status === 'ERROR') {
+      const status = (data?.status || '').toUpperCase();
+      pollCount += 1;
+      // Log first poll, every status transition, and every 6th poll (~1/min at 10s interval).
+      if (status !== lastStatus || pollCount === 1 || pollCount % 6 === 0) {
+        const elapsed = Math.floor((Date.now() - start) / 1000);
+        console.log(`[Gateway B4] poll #${pollCount} encounter=${encounterId} status=${status || '?'} elapsed=${elapsed}s`);
+        lastStatus = status;
+      }
+      if (SUCCESS.has(status)) return data;
+      if (FAILURE.has(status)) {
         throw new Error(`Gateway B4: task ${status}: ${data?.error || 'no error message'}`);
       }
       await new Promise(r => setTimeout(r, this.pollIntervalMs));
     }
-    throw new Error(`Gateway B4: poll timeout after ${this.pollTimeoutMs}ms`);
+    throw new Error(`Gateway B4: poll timeout after ${this.pollTimeoutMs}ms (last status: ${lastStatus || 'none'})`);
   }
 
   async fetchEncounter(encounterId) {
