@@ -186,7 +186,11 @@ async function migrate() {
     for (const sql of indexes) await client.query(sql);
 
     console.log('👤 default admin...');
-    const passwordHash = await bcrypt.hash('admin123', 10);
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (!adminPassword) {
+      throw new Error('ADMIN_PASSWORD env var is required to seed the admin user. See .env.example.');
+    }
+    const passwordHash = await bcrypt.hash(adminPassword, 10);
     await client.query(
       `INSERT INTO ${SCHEMA}.users (user_id, password_hash, name, role, email)
        VALUES ('admin', $1, 'System Administrator', 'admin', 'admin@medcode.ai')

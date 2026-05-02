@@ -1,9 +1,17 @@
 import { AccessRepository } from '../db/accessRepository.js';
 import { query } from '../db/connection.js';
 
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'dev-admin-token-change-me';
+function requireEnv(name) {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(`Missing required env var: ${name}. See .env.example.`);
+  }
+  return v;
+}
+
+const ADMIN_TOKEN = requireEnv('ADMIN_TOKEN');
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+const ADMIN_PASSWORD = requireEnv('ADMIN_PASSWORD');
 
 export function verifyAdminCredentials(username, password) {
   return username === ADMIN_USERNAME && password === ADMIN_PASSWORD;

@@ -214,7 +214,10 @@ async function initDatabase() {
     // ═══════════════════════════════════════════════════════════════
     console.log('👤 Creating default admin user...');
 
-    const defaultPassword = 'admin123';
+    const defaultPassword = process.env.ADMIN_PASSWORD;
+    if (!defaultPassword) {
+      throw new Error('ADMIN_PASSWORD env var is required to seed the admin user. See .env.example.');
+    }
     const passwordHash = await bcrypt.hash(defaultPassword, 10);
 
     await client.query(
@@ -224,8 +227,7 @@ async function initDatabase() {
     );
     console.log('   ✅ Default admin user created');
     console.log('   📝 Username: admin');
-    console.log('   📝 Password: admin123');
-    console.log('   ⚠️  Please change the password after first login!\n');
+    console.log('   📝 Password: (set via ADMIN_PASSWORD env var)\n');
 
     // ═══════════════════════════════════════════════════════════════
     // VERIFY TABLES
