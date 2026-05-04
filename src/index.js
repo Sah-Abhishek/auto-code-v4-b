@@ -5,6 +5,7 @@ import routes from './routes/index.js';
 import { pool } from './db/connection.js';
 import { websocketService } from './services/websocketService.js';
 import { runAuthMigration } from './db/migrateAuth.js';
+import { runMessagesMigration } from './db/migrateMessages.js';
 
 // Safety net: never let an async route handler / pg event take the process down.
 // We log loudly so issues stay visible, but the server keeps serving traffic.
@@ -77,6 +78,8 @@ async function startServer() {
     await pool.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS gateway_encounter JSONB`);
     await runAuthMigration(pool);
     console.log('✅ Auth migration applied');
+    await runMessagesMigration(pool);
+    console.log('✅ Messages migration applied');
 
     // Start server and capture HTTP server instance for WebSocket
     const server = app.listen(config.port, async () => {

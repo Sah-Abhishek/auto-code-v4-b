@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { chartController } from '../controllers/chartController.js';
 import { query } from '../db/connection.js';
 import { authenticate, requireAdmin, requireChartOwnership } from '../middleware/auth.js';
+import { MessageRepository } from '../db/messageRepository.js';
 
 const router = Router();
 
@@ -161,5 +162,74 @@ router.patch('/:chartNumber/status', requireChartOwnership, chartController.upda
 
 // Delete chart
 router.delete('/:chartNumber', requireChartOwnership, chartController.deleteChart.bind(chartController));
+
+// ═══════════════════════════════════════════════════════════════
+// CHART MESSAGES (chart-scoped chat between user and admin)
+// ═══════════════════════════════════════════════════════════════
+
+router.get('/:chartNumber/messages', requireChartOwnership, async (req, res) => {
+  try {
+    const { chartNumber } = req.params;
+    const role = req.auth?.role;
+    const messages = await MessageRepository.list(chartNumber);
+    // Mark messages from the *other* side as read for this viewer.
+    if (role === 'admin' || role === 'user') {
+      await MessageRepository.markRead(chartNumber, role);
+    }
+    res.json({ success: true, messages });
+  } catch (err) {
+    console.error('List messages failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/:chartNumber/messages', requireChartOwnership, async (req, res) => {
+  try {
+    const { chartNumber } = req.params;
+    const role = req.auth?.role;
+    if (role !== 'user' && role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const body = typeof req.body?.body === 'string' ? req.body.body.trim() : '';
+    if (!body) {
+      return res.status(400).json({ success: false, error: 'Message body is required' });
+    }
+    if (body.length > 4000) {
+      return res.status(400).json({ success: false, error: 'Message too long (max 4000 chars)' });
+    }
+    const chart = await MessageRepository.getChartByNumber(chartNumber);
+    if (!chart) return res.status(404).json({ success: false, error: 'Chart not found' });
+
+    const senderName = role === 'admin'
+      ? 'Admin'
+      : (req.auth?.account?.user_name || req.auth?.account?.email || 'User');
+
+    const message = await MessageRepository.create({
+      chartId: chart.id,
+      chartNumber: chart.chart_number,
+      ownerCode: chart.owner_code,
+      senderRole: role,
+      senderName,
+      body
+    });
+    res.status(201).json({ success: true, message });
+  } catch (err) {
+    console.error('Create message failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/messages/threads/mine', async (req, res) => {
+  try {
+    if (req.auth?.role !== 'user') {
+      return res.status(403).json({ success: false, error: 'User access required' });
+    }
+    const threads = await MessageRepository.listThreadsForOwner(req.auth.code);
+    res.json({ success: true, threads });
+  } catch (err) {
+    console.error('List user threads failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 export default router;

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { AccessRepository } from '../db/accessRepository.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 import { query } from '../db/connection.js';
+import { MessageRepository } from '../db/messageRepository.js';
 
 const router = Router();
 
@@ -243,6 +244,18 @@ router.get('/accounts/:code/corrections', async (req, res) => {
     });
   } catch (err) {
     console.error('Admin list corrections failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// All chart-message threads across the system (newest activity first)
+router.get('/messages/threads', async (req, res) => {
+  try {
+    const threads = await MessageRepository.listThreadsForAdmin();
+    const totalUnread = threads.reduce((sum, t) => sum + (t.unread_count || 0), 0);
+    res.json({ success: true, threads, totalUnread });
+  } catch (err) {
+    console.error('Admin list threads failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

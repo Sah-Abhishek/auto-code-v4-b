@@ -8,12 +8,13 @@ const router = Router();
 
 // Bump this whenever the API contract changes so clients can verify
 // which build is actually running.
-const API_VERSION = '1.2.0-admin-corrections';
+const API_VERSION = '1.3.0-chart-messages';
 const BUILD_FEATURES = [
   'admin-account-profile',
   'admin-account-charts',
   'admin-account-corrections',
-  'analytics-by-category'
+  'analytics-by-category',
+  'chart-messages'
 ];
 
 router.get('/health', (req, res) => {
@@ -56,7 +57,11 @@ router.get('/', (req, res) => {
         dashboardAnalytics: 'GET /api/charts/analytics/dashboard',
         modificationAnalytics: 'GET /api/charts/analytics/modifications',
         facilities: 'GET /api/charts/filters/facilities',
-        specialties: 'GET /api/charts/filters/specialties'
+        specialties: 'GET /api/charts/filters/specialties',
+        listMessages: 'GET /api/charts/:chartNumber/messages',
+        sendMessage: 'POST /api/charts/:chartNumber/messages',
+        myThreads: 'GET /api/charts/messages/threads/mine',
+        adminThreads: 'GET /api/admin/messages/threads'
       }
     }
   });

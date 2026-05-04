@@ -161,6 +161,22 @@ async function migrate() {
       )
     `);
 
+    console.log('💬 chart_messages...');
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS ${SCHEMA}.chart_messages (
+        id SERIAL PRIMARY KEY,
+        chart_id INTEGER NOT NULL REFERENCES ${SCHEMA}.charts(id) ON DELETE CASCADE,
+        chart_number VARCHAR(100) NOT NULL,
+        owner_code VARCHAR(32),
+        sender_role VARCHAR(20) NOT NULL,
+        sender_name VARCHAR(255),
+        body TEXT NOT NULL,
+        read_by_admin BOOLEAN DEFAULT FALSE,
+        read_by_user BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     console.log('🔍 indexes...');
     const indexes = [
       `CREATE INDEX IF NOT EXISTS idx_charts_ai_status      ON ${SCHEMA}.charts(ai_status)`,
@@ -182,6 +198,10 @@ async function migrate() {
       `CREATE INDEX IF NOT EXISTS idx_users_is_active       ON ${SCHEMA}.users(is_active)`,
       `CREATE INDEX IF NOT EXISTS idx_access_accounts_code  ON ${SCHEMA}.access_accounts(code)`,
       `CREATE INDEX IF NOT EXISTS idx_access_accounts_revoked ON ${SCHEMA}.access_accounts(revoked)`,
+      `CREATE INDEX IF NOT EXISTS idx_chart_messages_chart_id  ON ${SCHEMA}.chart_messages(chart_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_chart_messages_chart_num ON ${SCHEMA}.chart_messages(chart_number)`,
+      `CREATE INDEX IF NOT EXISTS idx_chart_messages_owner_code ON ${SCHEMA}.chart_messages(owner_code)`,
+      `CREATE INDEX IF NOT EXISTS idx_chart_messages_created_at ON ${SCHEMA}.chart_messages(created_at DESC)`,
     ];
     for (const sql of indexes) await client.query(sql);
 
