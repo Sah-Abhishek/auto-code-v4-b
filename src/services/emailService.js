@@ -120,6 +120,79 @@ function buildWelcomeText({ userName, code, loginUrl, processLimit, validDays, v
   ].join('\n');
 }
 
+function buildVerifyHtml({ userName, verifyUrl, appUrl }) {
+  const safeName = escapeHtml(userName || 'there');
+  const safeUrl = escapeHtml(verifyUrl);
+  return `<!DOCTYPE html>
+<html>
+  <body style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; background:#f8fafc; margin:0; padding:24px; color:#0f172a;">
+    <div style="max-width:560px; margin:0 auto; background:#ffffff; border:1px solid #e2e8f0; border-radius:16px; overflow:hidden;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0F172A" style="background-color:#0F172A;">
+        <tr>
+          <td style="padding:24px 28px; color:#ffffff;">
+            <h1 style="margin:0; font-size:20px; font-weight:600; color:#ffffff;">Verify your email</h1>
+            <p style="margin:4px 0 0; font-size:13px; color:#ffffff; opacity:.8;">One more step to start your trial</p>
+          </td>
+        </tr>
+      </table>
+      <div style="padding:28px;">
+        <p style="margin:0 0 14px; font-size:15px;">Hi ${safeName},</p>
+        <p style="margin:0 0 18px; font-size:14px; line-height:1.55;">
+          Thanks for signing up for MedCode AI. Click the button below to verify your email address. The link is valid for 24 hours.
+        </p>
+        <div style="text-align:center; margin:24px 0;">
+          <a href="${safeUrl}" style="display:inline-block; background:#0369A1; color:#ffffff; text-decoration:none; padding:13px 24px; border-radius:10px; font-weight:600; font-size:14px;">
+            Verify email
+          </a>
+        </div>
+        <p style="margin:14px 0 0; font-size:12px; color:#64748b; text-align:center;">
+          Or copy this link into your browser:<br/>
+          <a href="${safeUrl}" style="color:#0369A1; word-break:break-all;">${safeUrl}</a>
+        </p>
+        <hr style="border:none; border-top:1px solid #e2e8f0; margin:22px 0;" />
+        <p style="margin:0; font-size:12px; color:#64748b; line-height:1.5;">
+          If you didn't sign up for MedCode AI, you can safely ignore this email.
+          ${appUrl ? `Website: <a href="${escapeHtml(appUrl)}" style="color:#0369A1;">${escapeHtml(appUrl)}</a>` : ''}
+        </p>
+      </div>
+    </div>
+  </body>
+</html>`;
+}
+
+function buildVerifyText({ userName, verifyUrl }) {
+  return [
+    `Hi ${userName || 'there'},`,
+    '',
+    'Thanks for signing up for MedCode AI.',
+    'Verify your email by opening the link below (valid 24 hours):',
+    '',
+    verifyUrl,
+    '',
+    "If you didn't sign up, you can ignore this email."
+  ].join('\n');
+}
+
+export async function sendVerificationEmail({ to, userName, verifyUrl }) {
+  if (!to) return { sent: false, reason: 'no recipient' };
+  const tx = getTransporter();
+  if (!tx) return { sent: false, reason: 'SMTP not configured' };
+
+  const appUrl = APP_URL || '';
+  const fromName = SMTP_FROM_NAME || 'MedCode AI';
+  const fromEmail = SMTP_FROM_EMAIL || SMTP_USER;
+
+  const info = await tx.sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to,
+    subject: 'Verify your email · MedCode AI',
+    text: buildVerifyText({ userName, verifyUrl }),
+    html: buildVerifyHtml({ userName, verifyUrl, appUrl })
+  });
+
+  return { sent: true, messageId: info.messageId };
+}
+
 export async function sendAccessCodeEmail({ to, userName, code, processLimit, validDays, validUntil }) {
   if (!to) return { sent: false, reason: 'no recipient' };
   const tx = getTransporter();

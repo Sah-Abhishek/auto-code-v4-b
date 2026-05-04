@@ -1,4 +1,4 @@
-import { pool, query } from './connection.js';
+import { getClient, query } from './connection.js';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -51,7 +51,7 @@ export const QueueService = {
    * UPDATED: Now respects retry_after for failed jobs
    */
   async claimNextJob(workerId) {
-    const client = await pool.connect();
+    const client = await getClient();
 
     try {
       await client.query('BEGIN');

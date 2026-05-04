@@ -1,7 +1,6 @@
 import { Router } from 'express';
 import { AccessRepository } from '../db/accessRepository.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
-import { sendAccessCodeEmail } from '../services/emailService.js';
 import { query } from '../db/connection.js';
 
 const router = Router();
@@ -15,61 +14,7 @@ const CORRECTION_CATEGORIES = [
   { key: 'modifiers', label: 'Modifiers' }
 ];
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 router.use(authenticate, requireAdmin);
-
-router.post('/accounts', async (req, res) => {
-  try {
-    const { clientName, speciality, userName, designation, processLimit, validDays, email } = req.body || {};
-    const limit = parseInt(processLimit, 10);
-    const days = parseInt(validDays, 10);
-    const trimmedEmail = typeof email === 'string' ? email.trim() : '';
-
-    if (!userName || !clientName || !Number.isInteger(limit) || limit < 1 || !Number.isInteger(days) || days < 1) {
-      return res.status(400).json({
-        success: false,
-        error: 'userName, clientName, processLimit (>=1) and validDays (>=1) are required'
-      });
-    }
-
-    if (trimmedEmail && !EMAIL_RE.test(trimmedEmail)) {
-      return res.status(400).json({ success: false, error: 'Invalid email address' });
-    }
-
-    const account = await AccessRepository.create({
-      clientName,
-      speciality: speciality || '',
-      userName,
-      designation: designation || '',
-      processLimit: limit,
-      validDays: days,
-      email: trimmedEmail || null
-    });
-
-    let emailResult = { sent: false, reason: 'no email provided' };
-    if (trimmedEmail) {
-      try {
-        emailResult = await sendAccessCodeEmail({
-          to: trimmedEmail,
-          userName: account.user_name,
-          code: account.code,
-          processLimit: account.process_limit,
-          validDays: account.valid_days,
-          validUntil: account.valid_until
-        });
-      } catch (mailErr) {
-        console.error('Welcome email failed:', mailErr);
-        emailResult = { sent: false, reason: mailErr.message };
-      }
-    }
-
-    res.status(201).json({ success: true, account, email: emailResult });
-  } catch (err) {
-    console.error('Create account failed:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
 
 router.get('/accounts', async (req, res) => {
   try {
@@ -87,6 +32,7 @@ router.get('/accounts', async (req, res) => {
         userName: a.user_name,
         designation: a.designation,
         email: a.email,
+        emailVerified: !!a.email_verified,
         processLimit: a.process_limit,
         processUsed: a.process_used,
         processRemaining: Math.max(0, a.process_limit - a.process_used),
@@ -109,6 +55,16 @@ router.get('/accounts', async (req, res) => {
 router.post('/accounts/:code/revoke', async (req, res) => {
   try {
     const account = await AccessRepository.revoke(req.params.code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+    res.json({ success: true, account });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/accounts/:code/unrevoke', async (req, res) => {
+  try {
+    const account = await AccessRepository.unrevoke(req.params.code);
     if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
     res.json({ success: true, account });
   } catch (err) {
@@ -145,6 +101,7 @@ router.get('/accounts/:code', async (req, res) => {
         userName: account.user_name,
         designation: account.designation,
         email: account.email,
+        emailVerified: !!account.email_verified,
         processLimit: account.process_limit,
         processUsed: account.process_used,
         processRemaining: Math.max(0, account.process_limit - account.process_used),

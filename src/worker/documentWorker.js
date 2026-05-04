@@ -15,6 +15,17 @@ import { createSLATracker } from '../utils/slaTracker.js';
 import os from 'os';
 import axios from 'axios';
 
+// Keep the worker alive across transient pg / network errors.
+// Without these, a single ETIMEDOUT during the periodic sweep takes the
+// process down and stops draining the queue.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('❌ Unhandled rejection (worker):', err.code || err.message);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception (worker):', err?.code || err?.message || err);
+});
+
 const DOC_TYPE_TO_REPORT_TYPE = {
   'ed-notes': 'ED_NOTE',
   'labs': 'LAB',

@@ -1,5 +1,11 @@
 import { query } from './connection.js';
 import crypto from 'crypto';
+import bcrypt from 'bcrypt';
+
+const BCRYPT_ROUNDS = 10;
+const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+const SELF_SERVE_PROCESS_LIMIT = 5;
+const SELF_SERVE_VALID_DAYS = 365;
 
 function generateCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -10,6 +16,10 @@ function generateCode() {
     if (i === 3 || i === 7) out += '-';
   }
   return out;
+}
+
+function generateVerificationToken() {
+  return crypto.randomBytes(32).toString('hex');
 }
 
 export const AccessRepository = {
@@ -32,6 +42,114 @@ export const AccessRepository = {
       }
     }
     throw new Error('Failed to generate unique code');
+  },
+
+  async createSelfServe({ name, email, password, organization, designation }) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const validUntil = new Date(Date.now() + SELF_SERVE_VALID_DAYS * 24 * 60 * 60 * 1000);
+    const verificationToken = generateVerificationToken();
+    const verificationExpiresAt = new Date(Date.now() + VERIFICATION_TTL_MS);
+    const clientName = organization && organization.trim() ? organization.trim() : null;
+    const designationValue = designation && designation.trim() ? designation.trim() : null;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generateCode();
+      try {
+        const result = await query(
+          `INSERT INTO access_accounts
+            (code, user_name, email, password_hash, client_name, designation,
+             process_limit, valid_days, valid_until,
+             email_verified, verification_token, verification_expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, $11)
+           RETURNING *`,
+          [
+            code,
+            name.trim(),
+            normalizedEmail,
+            passwordHash,
+            clientName,
+            designationValue,
+            SELF_SERVE_PROCESS_LIMIT,
+            SELF_SERVE_VALID_DAYS,
+            validUntil,
+            verificationToken,
+            verificationExpiresAt
+          ]
+        );
+        return { account: result.rows[0], verificationToken };
+      } catch (err) {
+        if (err.code === '23505' && err.constraint && err.constraint.includes('email')) {
+          const e = new Error('Email already registered');
+          e.code = 'EMAIL_TAKEN';
+          throw e;
+        }
+        if (err.code === '23505') continue;
+        throw err;
+      }
+    }
+    throw new Error('Failed to generate unique code');
+  },
+
+  async findByEmail(email) {
+    if (!email) return undefined;
+    const result = await query(
+      `SELECT * FROM access_accounts WHERE LOWER(email) = LOWER($1)`,
+      [email.trim()]
+    );
+    return result.rows[0];
+  },
+
+  async verifyPassword(account, password) {
+    if (!account || !account.password_hash) return false;
+    return bcrypt.compare(password, account.password_hash);
+  },
+
+  async verifyEmailToken(token) {
+    if (!token) return { ok: false, reason: 'Missing token' };
+    const result = await query(
+      `SELECT * FROM access_accounts WHERE verification_token = $1`,
+      [token]
+    );
+    const account = result.rows[0];
+    if (!account) return { ok: false, reason: 'Invalid or already-used verification link' };
+    if (account.email_verified) return { ok: true, account, alreadyVerified: true };
+    if (account.verification_expires_at && new Date(account.verification_expires_at) < new Date()) {
+      return { ok: false, reason: 'Verification link has expired. Request a new one.' };
+    }
+    const updated = await query(
+      `UPDATE access_accounts
+       SET email_verified = TRUE
+       WHERE id = $1
+       RETURNING *`,
+      [account.id]
+    );
+    return { ok: true, account: updated.rows[0] };
+  },
+
+  async regenerateVerification(email) {
+    const account = await this.findByEmail(email);
+    if (!account) return { ok: false, reason: 'No account with that email' };
+    if (account.email_verified) return { ok: false, reason: 'Email already verified' };
+    const verificationToken = generateVerificationToken();
+    const verificationExpiresAt = new Date(Date.now() + VERIFICATION_TTL_MS);
+    const result = await query(
+      `UPDATE access_accounts
+       SET verification_token = $1, verification_expires_at = $2
+       WHERE id = $3
+       RETURNING *`,
+      [verificationToken, verificationExpiresAt, account.id]
+    );
+    return { ok: true, account: result.rows[0], verificationToken };
+  },
+
+  async unrevoke(code) {
+    const result = await query(
+      `UPDATE access_accounts SET revoked = FALSE, revoked_at = NULL
+       WHERE code = $1 RETURNING *`,
+      [code]
+    );
+    return result.rows[0];
   },
 
   async findByCode(code) {

@@ -4,6 +4,17 @@ import { config } from './config.js';
 import routes from './routes/index.js';
 import { pool } from './db/connection.js';
 import { websocketService } from './services/websocketService.js';
+import { runAuthMigration } from './db/migrateAuth.js';
+
+// Safety net: never let an async route handler / pg event take the process down.
+// We log loudly so issues stay visible, but the server keeps serving traffic.
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  console.error('❌ Unhandled rejection:', err.code || err.message);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception:', err?.code || err?.message || err);
+});
 
 const app = express();
 
@@ -31,10 +42,26 @@ app.get('/', (req, res) => {
 });
 
 // Error handling
+const DB_TRANSIENT_CODES = new Set([
+  'ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH',
+  'EAI_AGAIN', 'EPIPE',
+  '57P01', '57P02', '57P03', '08000', '08001', '08003', '08004', '08006', '08007', '08P01',
+]);
+const isDbTransient = (err) => {
+  if (!err) return false;
+  if (DB_TRANSIENT_CODES.has(err.code)) return true;
+  if (Array.isArray(err.errors) && err.errors.some(e => DB_TRANSIENT_CODES.has(e?.code))) return true;
+  return false;
+};
+
 app.use((error, req, res, next) => {
-  console.error('❌ Error:', error.message);
+  console.error('❌ Error:', error.code || error.message);
   if (error.code === 'LIMIT_FILE_SIZE') {
     return res.status(400).json({ success: false, error: 'File too large (max 25MB)' });
+  }
+  if (isDbTransient(error)) {
+    res.set('Retry-After', '5');
+    return res.status(503).json({ success: false, error: 'Service temporarily unavailable, please retry' });
   }
   res.status(500).json({ success: false, error: error.message });
 });
@@ -48,6 +75,8 @@ async function startServer() {
 
     // Idempotent migrations for additive columns (safe on fresh + existing DBs)
     await pool.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS gateway_encounter JSONB`);
+    await runAuthMigration(pool);
+    console.log('✅ Auth migration applied');
 
     // Start server and capture HTTP server instance for WebSocket
     const server = app.listen(config.port, async () => {
