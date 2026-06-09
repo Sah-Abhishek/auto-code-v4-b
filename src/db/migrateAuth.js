@@ -10,6 +10,8 @@ export async function runAuthMigration(executor) {
   await executor.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE`);
   await executor.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255)`);
   await executor.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMP`);
+  await executor.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255)`);
+  await executor.query(`ALTER TABLE access_accounts ADD COLUMN IF NOT EXISTS reset_expires_at TIMESTAMP`);
 
   await executor.query(`ALTER TABLE access_accounts ALTER COLUMN client_name DROP NOT NULL`).catch(() => {});
   await executor.query(`ALTER TABLE access_accounts ALTER COLUMN speciality DROP NOT NULL`).catch(() => {});
@@ -21,6 +23,7 @@ export async function runAuthMigration(executor) {
     WHERE email IS NOT NULL
   `);
   await executor.query(`CREATE INDEX IF NOT EXISTS idx_access_accounts_verification_token ON access_accounts(verification_token)`);
+  await executor.query(`CREATE INDEX IF NOT EXISTS idx_access_accounts_reset_token ON access_accounts(reset_token)`);
 }
 
 async function runStandalone() {

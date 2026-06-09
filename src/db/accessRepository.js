@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 
 const BCRYPT_ROUNDS = 10;
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
+const RESET_TTL_MS = 60 * 60 * 1000;
 const SELF_SERVE_PROCESS_LIMIT = 5;
 const SELF_SERVE_VALID_DAYS = 365;
 
@@ -44,7 +45,7 @@ export const AccessRepository = {
     throw new Error('Failed to generate unique code');
   },
 
-  async createSelfServe({ name, email, password, organization, designation }) {
+  async createSelfServe({ name, email, password, organization, designation, phone }) {
     const normalizedEmail = email.trim().toLowerCase();
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const validUntil = new Date(Date.now() + SELF_SERVE_VALID_DAYS * 24 * 60 * 60 * 1000);
@@ -52,16 +53,17 @@ export const AccessRepository = {
     const verificationExpiresAt = new Date(Date.now() + VERIFICATION_TTL_MS);
     const clientName = organization && organization.trim() ? organization.trim() : null;
     const designationValue = designation && designation.trim() ? designation.trim() : null;
+    const phoneValue = phone && phone.trim() ? phone.trim() : null;
 
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = generateCode();
       try {
         const result = await query(
           `INSERT INTO access_accounts
-            (code, user_name, email, password_hash, client_name, designation,
+            (code, user_name, email, password_hash, client_name, designation, phone,
              process_limit, valid_days, valid_until,
              email_verified, verification_token, verification_expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE, $10, $11)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, $11, $12)
            RETURNING *`,
           [
             code,
@@ -70,6 +72,7 @@ export const AccessRepository = {
             passwordHash,
             clientName,
             designationValue,
+            phoneValue,
             SELF_SERVE_PROCESS_LIMIT,
             SELF_SERVE_VALID_DAYS,
             validUntil,
@@ -143,6 +146,44 @@ export const AccessRepository = {
     return { ok: true, account: result.rows[0], verificationToken };
   },
 
+  async createPasswordReset(email) {
+    const account = await this.findByEmail(email);
+    if (!account || !account.password_hash) return { ok: false, reason: 'No account with that email' };
+    const resetToken = generateVerificationToken();
+    const resetExpiresAt = new Date(Date.now() + RESET_TTL_MS);
+    const result = await query(
+      `UPDATE access_accounts
+       SET reset_token = $1, reset_expires_at = $2
+       WHERE id = $3
+       RETURNING *`,
+      [resetToken, resetExpiresAt, account.id]
+    );
+    return { ok: true, account: result.rows[0], resetToken };
+  },
+
+  async resetPasswordWithToken(token, newPassword) {
+    if (!token) return { ok: false, reason: 'Missing token' };
+    const result = await query(
+      `SELECT * FROM access_accounts WHERE reset_token = $1`,
+      [token]
+    );
+    const account = result.rows[0];
+    if (!account) return { ok: false, reason: 'Invalid or already-used reset link' };
+    if (account.reset_expires_at && new Date(account.reset_expires_at) < new Date()) {
+      return { ok: false, reason: 'Reset link has expired. Request a new one.' };
+    }
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    // A successful reset proves the user controls the inbox, so confirm the email too.
+    const updated = await query(
+      `UPDATE access_accounts
+       SET password_hash = $1, reset_token = NULL, reset_expires_at = NULL, email_verified = TRUE
+       WHERE id = $2
+       RETURNING *`,
+      [passwordHash, account.id]
+    );
+    return { ok: true, account: updated.rows[0] };
+  },
+
   async unrevoke(code) {
     const result = await query(
       `UPDATE access_accounts SET revoked = FALSE, revoked_at = NULL
@@ -181,6 +222,14 @@ export const AccessRepository = {
     const result = await query(
       `UPDATE access_accounts SET revoked = TRUE, revoked_at = CURRENT_TIMESTAMP
        WHERE code = $1 RETURNING *`,
+      [code]
+    );
+    return result.rows[0];
+  },
+
+  async deleteByCode(code) {
+    const result = await query(
+      `DELETE FROM access_accounts WHERE code = $1 RETURNING *`,
       [code]
     );
     return result.rows[0];

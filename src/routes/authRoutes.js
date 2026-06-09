@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { AccessRepository } from '../db/accessRepository.js';
 import { verifyAdminCredentials, getAdminToken, authenticate, signUserJwt } from '../middleware/auth.js';
-import { sendVerificationEmail } from '../services/emailService.js';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../services/emailService.js';
 
 const router = Router();
 
@@ -10,6 +10,10 @@ const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').repla
 
 function buildVerifyUrl(token) {
   return `${FRONTEND_URL}/verify-email?token=${encodeURIComponent(token)}`;
+}
+
+function buildResetUrl(token) {
+  return `${FRONTEND_URL}/reset-password?token=${encodeURIComponent(token)}`;
 }
 
 function publicUser(account) {
@@ -44,17 +48,23 @@ router.post('/admin/login', (req, res) => {
 
 router.post('/signup', async (req, res) => {
   try {
-    const { name, email, password, organization, designation } = req.body || {};
+    const { name, email, password, organization, designation, phone } = req.body || {};
     const trimmedName = typeof name === 'string' ? name.trim() : '';
     const trimmedEmail = typeof email === 'string' ? email.trim() : '';
     const trimmedOrg = typeof organization === 'string' ? organization.trim() : '';
     const trimmedDesignation = typeof designation === 'string' ? designation.trim() : '';
+    const trimmedPhone = typeof phone === 'string' ? phone.trim() : '';
     const pw = typeof password === 'string' ? password : '';
 
     if (!trimmedName) return res.status(400).json({ success: false, error: 'Name is required' });
     if (!EMAIL_RE.test(trimmedEmail)) return res.status(400).json({ success: false, error: 'Valid email is required' });
     if (pw.length < 8) return res.status(400).json({ success: false, error: 'Password must be at least 8 characters' });
     if (!trimmedOrg) return res.status(400).json({ success: false, error: 'Organization is required' });
+    // Phone format: leading "+", country code, then 6-15 digits (E.164-ish, allowing spaces/dashes that we strip).
+    const phoneDigits = trimmedPhone.replace(/[\s-]/g, '');
+    if (!/^\+\d{1,4}\d{6,15}$/.test(phoneDigits)) {
+      return res.status(400).json({ success: false, error: 'Valid phone number with country code is required' });
+    }
 
     const existing = await AccessRepository.findByEmail(trimmedEmail);
     if (existing) {
@@ -66,7 +76,8 @@ router.post('/signup', async (req, res) => {
       email: trimmedEmail,
       password: pw,
       organization: trimmedOrg,
-      designation: trimmedDesignation
+      designation: trimmedDesignation,
+      phone: phoneDigits
     });
 
     let emailResult = { sent: false };
@@ -179,6 +190,55 @@ router.post('/resend-verification', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Resend verification failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    const trimmedEmail = typeof email === 'string' ? email.trim() : '';
+    if (!EMAIL_RE.test(trimmedEmail)) {
+      return res.status(400).json({ success: false, error: 'Valid email is required' });
+    }
+    const result = await AccessRepository.createPasswordReset(trimmedEmail);
+    // Always respond with success to avoid leaking which emails are registered
+    if (result.ok) {
+      try {
+        await sendPasswordResetEmail({
+          to: result.account.email,
+          userName: result.account.user_name,
+          resetUrl: buildResetUrl(result.resetToken)
+        });
+      } catch (mailErr) {
+        console.error('Password reset email failed:', mailErr.message);
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Forgot password failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, password } = req.body || {};
+    const tok = typeof token === 'string' ? token : '';
+    const pw = typeof password === 'string' ? password : '';
+    if (!tok) {
+      return res.status(400).json({ success: false, error: 'Missing reset token' });
+    }
+    if (pw.length < 8) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 8 characters' });
+    }
+    const result = await AccessRepository.resetPasswordWithToken(tok, pw);
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.reason });
+    }
+    res.json({ success: true, email: result.account.email });
+  } catch (err) {
+    console.error('Reset password failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

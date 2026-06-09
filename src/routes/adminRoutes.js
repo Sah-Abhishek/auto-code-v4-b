@@ -73,6 +73,16 @@ router.post('/accounts/:code/unrevoke', async (req, res) => {
   }
 });
 
+router.delete('/accounts/:code', async (req, res) => {
+  try {
+    const account = await AccessRepository.deleteByCode(req.params.code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+    res.json({ success: true, account });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/analytics', async (req, res) => {
   try {
     const analytics = await AccessRepository.getAnalytics();
