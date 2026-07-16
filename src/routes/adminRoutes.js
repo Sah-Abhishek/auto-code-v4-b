@@ -3,6 +3,7 @@ import { AccessRepository } from '../db/accessRepository.js';
 import { authenticate, requireAdmin } from '../middleware/auth.js';
 import { query } from '../db/connection.js';
 import { MessageRepository } from '../db/messageRepository.js';
+import { calculateProcessingDuration } from '../utils/slaTracker.js';
 
 const router = Router();
 
@@ -213,7 +214,8 @@ router.get('/accounts/:code/charts', async (req, res) => {
          c.id, c.chart_number, c.mrn, c.facility, c.specialty, c.date_of_service,
          c.provider, c.document_count, c.ai_status, c.review_status,
          c.submitted_at, c.submitted_by, c.created_at, c.updated_at,
-         c.user_modifications, c.hidden_from_owner
+         c.user_modifications, c.hidden_from_owner,
+         c.processing_started_at, c.processing_completed_at
        FROM charts c
        WHERE c.owner_code = $1
        ORDER BY c.created_at DESC`,
@@ -226,6 +228,8 @@ router.get('/accounts/:code/charts', async (req, res) => {
       for (const { key } of CORRECTION_CATEGORIES) {
         if (Array.isArray(mods[key])) correctionCount += mods[key].length;
       }
+      // Processing duration (upload → AI completion); still-elapsing if incomplete
+      const slaInfo = calculateProcessingDuration(r.created_at, r.processing_completed_at);
       return {
         id: r.id,
         chartNumber: r.chart_number,
@@ -241,6 +245,14 @@ router.get('/accounts/:code/charts', async (req, res) => {
         submittedBy: r.submitted_by,
         correctionCount,
         hidden: !!r.hidden_from_owner,
+        processingTime: slaInfo ? {
+          display: slaInfo.display,
+          isComplete: slaInfo.isComplete,
+          isExcellent: !!slaInfo.isExcellent,
+          isGood: !!slaInfo.isGood,
+          isWarning: !!slaInfo.isWarning,
+          isCritical: !!slaInfo.isCritical
+        } : null,
         createdAt: r.created_at,
         updatedAt: r.updated_at
       };
