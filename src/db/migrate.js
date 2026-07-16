@@ -62,6 +62,7 @@ async function migrate() {
         processing_completed_at TIMESTAMP,
 
         owner_code VARCHAR(32),
+        hidden_from_owner BOOLEAN DEFAULT FALSE,
 
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

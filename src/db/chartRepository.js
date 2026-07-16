@@ -293,6 +293,7 @@ export const ChartRepository = {
       reviewStatus,
       search,
       ownerCode,
+      excludeHidden = false,
       page = 1,
       limit = 10,
       sortBy = 'created_at',
@@ -307,6 +308,11 @@ export const ChartRepository = {
       whereConditions.push(`owner_code = $${paramIndex}`);
       params.push(ownerCode);
       paramIndex++;
+    }
+
+    // Users never see charts an admin has hidden from their account
+    if (excludeHidden) {
+      whereConditions.push(`hidden_from_owner IS NOT TRUE`);
     }
 
     if (facility) {
@@ -359,7 +365,7 @@ export const ChartRepository = {
     const dataResult = await query(
       `SELECT
         id, chart_number, mrn, facility, specialty, date_of_service, provider,
-        ai_status, review_status, document_count, owner_code,
+        ai_status, review_status, document_count, owner_code, hidden_from_owner,
         last_error, last_error_at, retry_count,
         processing_started_at, processing_completed_at,
         created_at, updated_at

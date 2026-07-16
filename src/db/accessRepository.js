@@ -214,6 +214,29 @@ export const AccessRepository = {
     return result.rows[0];
   },
 
+  // Admin adjustment of processing-run counters. Accepts absolute values;
+  // both are optional so either can be updated independently.
+  async setProcessCounts(code, { processLimit, processUsed }) {
+    const sets = [];
+    const params = [];
+    let i = 1;
+    if (processLimit !== undefined) {
+      sets.push(`process_limit = $${i++}`);
+      params.push(processLimit);
+    }
+    if (processUsed !== undefined) {
+      sets.push(`process_used = $${i++}`);
+      params.push(processUsed);
+    }
+    if (sets.length === 0) return this.findByCode(code);
+    params.push(code);
+    const result = await query(
+      `UPDATE access_accounts SET ${sets.join(', ')} WHERE code = $${i} RETURNING *`,
+      params
+    );
+    return result.rows[0];
+  },
+
   async updateLastLogin(code) {
     await query(`UPDATE access_accounts SET last_login_at = CURRENT_TIMESTAMP WHERE code = $1`, [code]);
   },

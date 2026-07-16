@@ -76,6 +76,8 @@ async function startServer() {
 
     // Idempotent migrations for additive columns (safe on fresh + existing DBs)
     await pool.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS gateway_encounter JSONB`);
+    // Admin can hide a processed chart from the owning user's account
+    await pool.query(`ALTER TABLE charts ADD COLUMN IF NOT EXISTS hidden_from_owner BOOLEAN DEFAULT FALSE`);
     await runAuthMigration(pool);
     console.log('✅ Auth migration applied');
     await runMessagesMigration(pool);

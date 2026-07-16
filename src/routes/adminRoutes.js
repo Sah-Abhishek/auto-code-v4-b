@@ -83,6 +83,78 @@ router.delete('/accounts/:code', async (req, res) => {
   }
 });
 
+// Adjust an account's processing-run counters (limit and/or used).
+// Body: { processLimit?: int >= 0, processUsed?: int >= 0 }
+router.patch('/accounts/:code/process', async (req, res) => {
+  try {
+    const account = await AccessRepository.findByCode(req.params.code);
+    if (!account) return res.status(404).json({ success: false, error: 'Account not found' });
+
+    const parseCount = (value, label) => {
+      if (value === undefined || value === null) return undefined;
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 0) {
+        throw new Error(`${label} must be a non-negative integer`);
+      }
+      return n;
+    };
+
+    let processLimit, processUsed;
+    try {
+      processLimit = parseCount(req.body?.processLimit, 'processLimit');
+      processUsed = parseCount(req.body?.processUsed, 'processUsed');
+    } catch (err) {
+      return res.status(400).json({ success: false, error: err.message });
+    }
+    if (processLimit === undefined && processUsed === undefined) {
+      return res.status(400).json({ success: false, error: 'Provide processLimit and/or processUsed' });
+    }
+
+    const updated = await AccessRepository.setProcessCounts(req.params.code, { processLimit, processUsed });
+    res.json({
+      success: true,
+      account: {
+        code: updated.code,
+        processLimit: updated.process_limit,
+        processUsed: updated.process_used,
+        processRemaining: Math.max(0, updated.process_limit - updated.process_used)
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Hide / unhide a processed chart from the owning user's account.
+// Hidden charts stay visible to admins but disappear from the user's views.
+router.post('/charts/:chartNumber/hide', async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE charts SET hidden_from_owner = TRUE, updated_at = CURRENT_TIMESTAMP
+       WHERE chart_number = $1 RETURNING chart_number, hidden_from_owner`,
+      [req.params.chartNumber]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Chart not found' });
+    res.json({ success: true, chartNumber: result.rows[0].chart_number, hidden: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/charts/:chartNumber/unhide', async (req, res) => {
+  try {
+    const result = await query(
+      `UPDATE charts SET hidden_from_owner = FALSE, updated_at = CURRENT_TIMESTAMP
+       WHERE chart_number = $1 RETURNING chart_number, hidden_from_owner`,
+      [req.params.chartNumber]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Chart not found' });
+    res.json({ success: true, chartNumber: result.rows[0].chart_number, hidden: false });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/analytics', async (req, res) => {
   try {
     const analytics = await AccessRepository.getAnalytics();
@@ -141,7 +213,7 @@ router.get('/accounts/:code/charts', async (req, res) => {
          c.id, c.chart_number, c.mrn, c.facility, c.specialty, c.date_of_service,
          c.provider, c.document_count, c.ai_status, c.review_status,
          c.submitted_at, c.submitted_by, c.created_at, c.updated_at,
-         c.user_modifications
+         c.user_modifications, c.hidden_from_owner
        FROM charts c
        WHERE c.owner_code = $1
        ORDER BY c.created_at DESC`,
@@ -168,6 +240,7 @@ router.get('/accounts/:code/charts', async (req, res) => {
         submittedAt: r.submitted_at,
         submittedBy: r.submitted_by,
         correctionCount,
+        hidden: !!r.hidden_from_owner,
         createdAt: r.created_at,
         updatedAt: r.updated_at
       };

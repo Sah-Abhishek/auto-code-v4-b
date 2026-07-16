@@ -32,6 +32,7 @@ class ChartController {
         reviewStatus,
         search,
         ownerCode,
+        excludeHidden: req.auth?.role === 'user',
         page: parseInt(page),
         limit: parseInt(limit),
         sortBy,
@@ -54,6 +55,7 @@ class ChartController {
           documentCount: chart.document_count,
           aiStatus: chart.ai_status,
           reviewStatus: chart.review_status,
+          hidden: !!chart.hidden_from_owner,
           // NEW: Error tracking fields
           lastError: chart.last_error,
           lastErrorAt: chart.last_error_at,

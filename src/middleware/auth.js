@@ -95,9 +95,13 @@ export async function requireChartOwnership(req, res, next) {
     if (req.auth?.role === 'admin') return next();
     const { chartNumber } = req.params;
     if (!chartNumber) return next();
-    const result = await query(`SELECT owner_code FROM charts WHERE chart_number = $1`, [chartNumber]);
+    const result = await query(`SELECT owner_code, hidden_from_owner FROM charts WHERE chart_number = $1`, [chartNumber]);
     if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Chart not found' });
     if (result.rows[0].owner_code !== req.auth.code) {
+      return res.status(404).json({ success: false, error: 'Chart not found' });
+    }
+    // Charts hidden by an admin are invisible to the owning user.
+    if (result.rows[0].hidden_from_owner) {
       return res.status(404).json({ success: false, error: 'Chart not found' });
     }
     next();

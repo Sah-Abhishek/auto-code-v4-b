@@ -85,6 +85,7 @@ export const MessageRepository = {
        FROM chart_messages m
        JOIN charts c ON c.id = m.chart_id
        WHERE m.owner_code = $1
+         AND c.hidden_from_owner IS NOT TRUE
        GROUP BY m.chart_number, c.mrn, c.facility
        ORDER BY MAX(m.created_at) DESC`,
       [ownerCode]
