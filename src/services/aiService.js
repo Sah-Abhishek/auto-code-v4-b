@@ -72,7 +72,7 @@ class AIService {
       encounter_type: this.encounterType,
       encounter_date: today,
       facility: chartInfo.facility || undefined,
-      department: chartInfo.specialty || undefined,
+      sub_speciality: chartInfo.specialty || undefined,
     };
     const { data } = await this.client.post('/api/encounters', body);
     if (!data?.id) throw new Error('Gateway B1: missing encounter id in response');
